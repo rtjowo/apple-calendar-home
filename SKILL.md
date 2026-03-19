@@ -190,19 +190,33 @@ After generating the project and writing the config:
 
 When writing ANY code that interacts with CalDAV (connection test scripts, sync modules, etc.), the AI MUST follow these **exact patterns**. Deviating from these will cause silent failures.
 
-#### 1. NEVER use `date_search()` — it is DEPRECATED
+#### 1. Feishu CalDAV requires RAW HTTP — do NOT use caldav library for Feishu (CRITICAL)
+
+Feishu CalDAV has non-standard behavior that breaks most caldav library versions:
+- `calendar-query` REPORT: returns event hrefs but **calendar-data returns 404**
+- `GET` individual `.ics` files: returns **403 Forbidden**
+- `calendar-multiget` REPORT: **this is the ONLY way** to get event data
+
+Therefore, for Feishu, you MUST use raw HTTP requests (the `requests` library), NOT the `caldav` library. The `_read_feishu_events_raw()` method in `source_code.md` shows the exact implementation.
+
+**The 3-step flow for Feishu:**
+```
+Step 1: PROPFIND → get calendar URLs
+Step 2: calendar-query REPORT → get event href list (no data)
+Step 3: calendar-multiget REPORT → get actual calendar-data ✅
+```
+
+#### 2. NEVER use `date_search()` — it is DEPRECATED
 
 ```python
 # ❌ WRONG — will fail silently or return empty
 events = calendar.date_search(start=start, end=end)
 
-# ✅ CORRECT — use search() with event=True
+# ✅ CORRECT — use search() with event=True (for non-Feishu servers like WeCom)
 events = calendar.search(start=start, end=end, event=True)
 ```
 
-`date_search()` is deprecated in caldav >= 1.x and may return empty results on some servers (including Feishu). Always use `calendar.search(start=start, end=end, event=True)`.
-
-#### 2. Use a WIDE time range for reading events (±30 days minimum)
+#### 3. Use a WIDE time range for reading events (±30 days minimum)
 
 ```python
 # ❌ WRONG — too narrow, will miss events
@@ -211,12 +225,10 @@ end = datetime.now() + timedelta(days=7)
 
 # ✅ CORRECT — wide range to ensure events are found
 start = datetime.now() - timedelta(days=30)
-end = datetime.now() + timedelta(days=30)
+end = now + timedelta(days=30)
 ```
 
-Feishu CalDAV may have timezone or date boundary issues with narrow ranges. Always use ±30 days for the initial test/sync to ensure events are found. The daemon can use a narrower range (7 days) for routine sync.
-
-#### 3. Feishu CalDAV server URL must have `https://` prefix
+#### 4. Feishu CalDAV server URL must have `https://` prefix
 
 ```python
 server = config.get("feishu_caldav_server", "")
@@ -224,151 +236,96 @@ if not server.startswith("http"):
     server = f"https://{server}"
 ```
 
-Users may provide just `caldav.feishu.cn` without the protocol. The code MUST auto-prepend `https://`.
-
-#### 4. Always try ALL calendars if calendar_name doesn't match
-
-```python
-calendars = principal.calendars()
-target = None
-if calendar_name:
-    for cal in calendars:
-        if cal.name and calendar_name.lower() in cal.name.lower():
-            target = cal
-            break
-# If no match, search ALL calendars
-if not target:
-    for cal in calendars:
-        events = cal.search(start=start, end=end, event=True)
-        if events:
-            # found events in this calendar
-            ...
-```
-
 #### 5. Feishu CalDAV connection test template
 
-When testing Feishu CalDAV, use EXACTLY this pattern:
+When testing Feishu CalDAV, use EXACTLY this raw HTTP pattern (NOT the caldav library):
 
 ```python
-from caldav import DAVClient
+import requests
+from requests.auth import HTTPBasicAuth
 from datetime import datetime, timedelta
+from xml.etree import ElementTree as ET
 from icalendar import Calendar as iCalendar
 
 server = feishu_caldav_server
 if not server.startswith("http"):
     server = f"https://{server}"
 
-client = DAVClient(url=server, username=feishu_username, password=feishu_password, timeout=30)
+auth = HTTPBasicAuth(feishu_username, feishu_password)
+ns = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:caldav"}
+
+# Step 1: PROPFIND 获取日历
+principal_url = f"{server}/{feishu_username}/"
+propfind_xml = '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>'
+resp = requests.request("PROPFIND", principal_url, auth=auth, data=propfind_xml,
+                        headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=30)
+
+root = ET.fromstring(resp.text)
+calendar_urls = []
+for response in root.findall(".//D:response", ns):
+    href = response.find("D:href", ns)
+    if href is not None and href.text and href.text != f"/{feishu_username}/":
+        calendar_urls.append(href.text)
+        print(f"  日历: {href.text}")
+
+# Step 2: calendar-query 获取事件引用
+now = datetime.utcnow()
+start = (now - timedelta(days=30)).strftime("%Y%m%dT%H%M%SZ")
+end = (now + timedelta(days=30)).strftime("%Y%m%dT%H%M%SZ")
+
+for cal_path in calendar_urls:
+    cal_url = f"{server}{cal_path}"
+    query_xml = f'''<?xml version="1.0"?>
+<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:">
+  <D:prop><D:getetag/></D:prop>
+  <C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT">
+    <C:time-range start="{start}" end="{end}"/>
+  </C:comp-filter></C:comp-filter></C:filter>
+</C:calendar-query>'''
+    resp = requests.request("REPORT", cal_url, auth=auth, data=query_xml,
+                            headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=30)
+    root = ET.fromstring(resp.text)
+    hrefs = [r.find("D:href", ns).text for r in root.findall(".//D:response", ns)
+             if r.find("D:href", ns) is not None and r.find("D:href", ns).text]
+
+    if not hrefs:
+        print("  无事件")
+        continue
+
+    # Step 3: calendar-multiget 获取实际数据
+    href_els = "\n".join(f"  <D:href>{h}</D:href>" for h in hrefs)
+    multiget_xml = f'''<?xml version="1.0"?>
+<C:calendar-multiget xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:">
+  <D:prop><D:getetag/><C:calendar-data/></D:prop>
+{href_els}
+</C:calendar-multiget>'''
+    resp = requests.request("REPORT", cal_url, auth=auth, data=multiget_xml,
+                            headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=30)
+    root = ET.fromstring(resp.text)
+    for response in root.findall(".//D:response", ns):
+        for propstat in response.findall("D:propstat", ns):
+            cal_data = propstat.find(".//C:calendar-data", ns)
+            if cal_data is not None and cal_data.text:
+                ical = iCalendar.from_ical(cal_data.text)
+                for c in ical.walk():
+                    if c.name == "VEVENT":
+                        print(f"    ✅ {c.get('summary')} ({c.get('dtstart').dt})")
+```
+
+#### 6. WeCom (企业微信) can use the caldav library normally
+
+WeCom CalDAV supports standard `calendar-query` with `calendar-data` and individual `GET`. Use the caldav library's `search()` for WeCom:
+
+```python
+client = DAVClient(url="https://caldav.wecom.work", username=username, password=password, timeout=30)
 principal = client.principal()
 calendars = principal.calendars()
-print(f"找到 {len(calendars)} 个飞书日历")
-
-now = datetime.now()
-start = now - timedelta(days=30)
-end = now + timedelta(days=30)
-
-total_events = 0
-for cal in calendars:
-    print(f"  日历: {cal.name}")
-    events = cal.search(start=start, end=end, event=True)  # MUST use search(), NOT date_search()
-    print(f"    事件数: {len(events)}")
-    total_events += len(events)
-    for ev in events:
-        ical = iCalendar.from_ical(ev.data)
-        for component in ical.walk():
-            if component.name == "VEVENT":
-                summary = component.get("summary", "")
-                dtstart = component.get("dtstart")
-                print(f"    - {summary} ({dtstart.dt if dtstart else 'N/A'})")
-
-if total_events == 0:
-    print("⚠️ 未找到事件，请确认飞书日历中有日程，且 CalDAV 同步已开启")
-else:
-    print(f"✅ 共找到 {total_events} 个飞书日程")
-```
-
-#### 6. DAVClient must set timeout=30
-
-Feishu CalDAV can be slow. Always set `timeout=30`:
-
-```python
-client = DAVClient(url=server, username=username, password=password, timeout=30)
-```
-
-#### 7. Feishu CalDAV returns 403 on individual GET — use REPORT data only (CRITICAL)
-
-Feishu CalDAV blocks GET requests for individual `.ics` files (returns `403 Forbidden`). However, the `REPORT` response already contains inline `calendar-data`. The `caldav` library's `search()` method handles this correctly — the `event.data` property will contain data from the REPORT response even though GET fails.
-
-**NEVER write custom code to fetch individual .ics files from Feishu.** Always use:
-
-```python
-events = cal.search(start=start, end=end, event=True)
-for event in events:
-    ical_data = event.data  # This works — data comes from REPORT, not GET
-    if not ical_data:
-        continue  # Skip if somehow empty
-    ical = iCalendar.from_ical(ical_data)
-    ...
-```
-
-**NEVER do this:**
-```python
-# ❌ WRONG — Feishu returns 403 on direct GET
-response = requests.get(event_url, auth=(username, password))
-# ❌ WRONG — manually fetching .ics files
-for href in event_hrefs:
-    resp = client.request(href)  # Will get 403
-```
-
-#### 8. caldav library version must be >= 1.3.0
-
-The `search()` method with inline `calendar-data` in REPORT requires caldav >= 1.3.0. Always specify in requirements.txt:
-
-```
-caldav>=1.3.0
-```
-
-#### 9. Reading events — complete correct pattern
-
-This is the ONLY correct way to read events from Feishu/WeCom CalDAV:
-
-```python
-from caldav import DAVClient
-from datetime import datetime, timedelta
-from icalendar import Calendar as iCalendar
-
-client = DAVClient(url=server_url, username=username, password=password, timeout=30)
-principal = client.principal()
-calendars = principal.calendars()
-
-now = datetime.now()
-start = now - timedelta(days=30)
-end = now + timedelta(days=30)
-
-all_events = []
 for cal in calendars:
     events = cal.search(start=start, end=end, event=True)
     for event in events:
         ical_data = event.data
-        if not ical_data:
-            continue
-        ical = iCalendar.from_ical(ical_data)
-        for component in ical.walk():
-            if component.name != "VEVENT":
-                continue
-            summary = str(component.get("summary", "")).strip()
-            dt_start = component.get("dtstart")
-            dt_end = component.get("dtend")
-            if not summary or not dt_start:
-                continue
-            all_events.append({
-                "summary": summary,
-                "dtstart": dt_start.dt,
-                "dtend": dt_end.dt if dt_end else None,
-            })
+        ...
 ```
-
-**Do NOT deviate from this pattern.** Do NOT add extra HTTP requests, do NOT try alternative fetch methods, do NOT use `events()` method (which also triggers individual GETs). Do NOT access `event.vobject_instance` or `event.icalendar_instance` — these may trigger a re-fetch via GET which will fail with 403 on Feishu. Always use `event.data` (string) and parse with `iCalendar.from_ical()`.
 
 ## Core Architecture
 
@@ -513,9 +470,11 @@ Sync WeCom/Feishu events to user's iCloud private calendar via CalDAV.
 - **Periodic sync**: Daemon calls `_maybe_sync_external()` every 30 minutes automatically.
 - **WeCom CalDAV server**: `https://caldav.wecom.work`
 - **Feishu CalDAV server**: User-provided (varies by organization). Code MUST auto-prepend `https://` if missing.
-- **⚠️ MUST use `calendar.search(start=start, end=end, event=True)`** — NOT `date_search()` which is deprecated and returns empty on Feishu.
-- **⚠️ Time range for reading**: Use ±30 days (NOT just 7 days forward). Feishu CalDAV may have timezone issues with narrow ranges.
-- **⚠️ DAVClient timeout**: Always set `timeout=30` — Feishu CalDAV can be slow.
+- **⚠️ Feishu uses RAW HTTP, not caldav library**: `sync_feishu()` calls `_read_feishu_events_raw()` which uses pure `requests` library with PROPFIND → calendar-query → calendar-multiget flow. This bypasses all caldav library version issues.
+- **⚠️ WeCom uses caldav library normally**: `sync_wecom()` uses standard caldav `search()`.
+- **⚠️ MUST use `calendar.search(start=start, end=end, event=True)`** for WeCom — NOT `date_search()` which is deprecated.
+- **⚠️ Time range for reading**: Use ±30 days (NOT just 7 days forward).
+- **⚠️ DAVClient timeout**: Always set `timeout=30` — external CalDAV servers can be slow.
 
 ### 3. Daemon (`daemon.py`) — REFACTORED
 

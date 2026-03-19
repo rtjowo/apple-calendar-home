@@ -1847,6 +1847,10 @@ class CalendarWriter:
 import logging
 import uuid
 from datetime import datetime, timedelta, date, timezone
+from xml.etree import ElementTree as ET
+
+import requests as http_requests
+from requests.auth import HTTPBasicAuth
 from caldav import DAVClient
 from icalendar import Calendar as iCalendar, Event
 from .config import config
@@ -1939,7 +1943,7 @@ class ExternalCalendarSync:
             return None
 
     def _read_events_from_external(self, principal, calendar_name="", days_ahead=30):
-        """从外部日历读取事件（默认 ±30 天宽范围，确保飞书等外部日历能正确返回结果）"""
+        """从外部日历读取事件（默认 ±30 天宽范围）— 企业微信等标准 CalDAV 服务器使用"""
         events_list = []
         try:
             calendars = principal.calendars()
@@ -1968,7 +1972,7 @@ class ExternalCalendarSync:
                         try:
                             ical_data = event.data
                             if not ical_data:
-                                logger.debug(f"事件数据为空，跳过 (可能 GET 被拒绝，但 REPORT 未包含数据)")
+                                logger.debug(f"事件数据为空，跳过")
                                 continue
                             ical = iCalendar.from_ical(ical_data)
                             for component in ical.walk():
@@ -1998,6 +2002,147 @@ class ExternalCalendarSync:
 
         except Exception as e:
             logger.error(f"读取外部日程失败: {e}")
+
+        return events_list
+
+    def _read_feishu_events_raw(self, server_url, username, password, days_ahead=30):
+        """
+        用纯 HTTP 请求读取飞书 CalDAV 日程（不依赖 caldav 库版本）
+
+        飞书 CalDAV 的特殊行为:
+        - calendar-query REPORT 不返回 calendar-data（返回 404）
+        - GET 单个 .ics 文件返回 403 Forbidden
+        - calendar-multiget REPORT 能正确返回 calendar-data
+        
+        因此必须用两步走:
+        1. PROPFIND 获取日历 URL + calendar-query 获取事件 href 列表
+        2. calendar-multiget 批量获取事件数据
+        """
+        events_list = []
+        auth = HTTPBasicAuth(username, password)
+        ns = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:caldav"}
+
+        try:
+            # Step 1: PROPFIND 获取用户的日历集合
+            principal_url = f"{server_url}/{username}/"
+            propfind_xml = '''<?xml version="1.0" encoding="UTF-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop><D:resourcetype/></D:prop>
+</D:propfind>'''
+            resp = http_requests.request(
+                "PROPFIND", principal_url, auth=auth, data=propfind_xml,
+                headers={"Content-Type": "application/xml", "Depth": "1"},
+                timeout=30,
+            )
+            if resp.status_code != 207:
+                logger.error(f"飞书 PROPFIND 失败: {resp.status_code}")
+                return events_list
+
+            root = ET.fromstring(resp.text)
+            calendar_urls = []
+            for response in root.findall(".//D:response", ns):
+                href = response.find("D:href", ns)
+                if href is not None and href.text and href.text != f"/{username}/":
+                    calendar_urls.append(href.text)
+                    logger.info(f"发现飞书日历: {href.text}")
+
+            if not calendar_urls:
+                logger.warning("未找到飞书日历")
+                return events_list
+
+            # Step 2: 对每个日历发 calendar-query 获取事件 href
+            now = datetime.utcnow()
+            start_str = (now - timedelta(days=days_ahead)).strftime("%Y%m%dT%H%M%SZ")
+            end_str = (now + timedelta(days=days_ahead)).strftime("%Y%m%dT%H%M%SZ")
+
+            for cal_path in calendar_urls:
+                cal_url = f"{server_url}{cal_path}"
+
+                query_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:">
+  <D:prop><D:getetag/></D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:time-range start="{start_str}" end="{end_str}"/>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>'''
+
+                resp = http_requests.request(
+                    "REPORT", cal_url, auth=auth, data=query_xml,
+                    headers={"Content-Type": "application/xml", "Depth": "1"},
+                    timeout=30,
+                )
+                if resp.status_code != 207:
+                    logger.warning(f"飞书 calendar-query 失败: {resp.status_code}")
+                    continue
+
+                root = ET.fromstring(resp.text)
+                hrefs = []
+                for response in root.findall(".//D:response", ns):
+                    href = response.find("D:href", ns)
+                    if href is not None and href.text:
+                        hrefs.append(href.text)
+
+                if not hrefs:
+                    logger.info(f"飞书日历 {cal_path} 无事件")
+                    continue
+
+                logger.info(f"飞书日历 {cal_path} 找到 {len(hrefs)} 个事件引用")
+
+                # Step 3: calendar-multiget 批量获取事件数据
+                href_elements = "\n".join(f"  <D:href>{h}</D:href>" for h in hrefs)
+                multiget_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-multiget xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:">
+  <D:prop>
+    <D:getetag/>
+    <C:calendar-data/>
+  </D:prop>
+{href_elements}
+</C:calendar-multiget>'''
+
+                resp = http_requests.request(
+                    "REPORT", cal_url, auth=auth, data=multiget_xml,
+                    headers={"Content-Type": "application/xml", "Depth": "1"},
+                    timeout=30,
+                )
+                if resp.status_code != 207:
+                    logger.warning(f"飞书 calendar-multiget 失败: {resp.status_code}")
+                    continue
+
+                root = ET.fromstring(resp.text)
+                for response in root.findall(".//D:response", ns):
+                    for propstat in response.findall("D:propstat", ns):
+                        cal_data_el = propstat.find(".//C:calendar-data", ns)
+                        if cal_data_el is None or not cal_data_el.text:
+                            continue
+                        try:
+                            ical = iCalendar.from_ical(cal_data_el.text)
+                            for component in ical.walk():
+                                if component.name != "VEVENT":
+                                    continue
+                                summary = str(component.get("summary", "")).strip()
+                                dt_start = component.get("dtstart")
+                                dt_end = component.get("dtend")
+                                if not summary or not dt_start:
+                                    continue
+                                events_list.append({
+                                    "summary": summary,
+                                    "dtstart": dt_start.dt,
+                                    "dtend": dt_end.dt if dt_end else None,
+                                    "description": str(component.get("description", "")),
+                                    "location": str(component.get("location", "")),
+                                    "transp": str(component.get("transp", "OPAQUE")).upper(),
+                                    "uid": str(component.get("uid", "")),
+                                })
+                        except Exception as e:
+                            logger.debug(f"解析飞书事件失败: {e}")
+                            continue
+
+        except Exception as e:
+            logger.error(f"读取飞书日程失败: {e}")
 
         return events_list
 
@@ -2112,7 +2257,7 @@ class ExternalCalendarSync:
         return written
 
     def sync_feishu(self):
-        """同步飞书日程到 iCloud"""
+        """同步飞书日程到 iCloud（使用纯 HTTP 方式，不依赖 caldav 库版本）"""
         if not config.is_feishu_enabled():
             logger.debug("飞书同步未启用")
             return 0
@@ -2131,16 +2276,13 @@ class ExternalCalendarSync:
         if not server.startswith("http"):
             server = f"https://{server}"
 
-        principal = self._connect_external_caldav(server, username, password)
-        if not principal:
-            print("❌ 飞书 CalDAV 连接失败")
-            return 0
-
-        events = self._read_events_from_external(principal, calendar_name)
+        # 使用纯 HTTP 方式读取飞书日程（飞书 CalDAV 不支持标准 GET 和 calendar-query calendar-data）
+        events = self._read_feishu_events_raw(server, username, password)
         if not events:
             print("  📭 飞书无待同步日程")
             return 0
 
+        print(f"  📥 读取到 {len(events)} 个飞书日程")
         icloud_cal = self._get_icloud_calendar()
         if not icloud_cal:
             print("❌ 无法获取 iCloud 日历")

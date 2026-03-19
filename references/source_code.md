@@ -2219,8 +2219,140 @@ class ExternalCalendarSync:
 
         return written
 
+    def _read_wecom_events_raw(self, username, password, days_ahead=30):
+        """
+        用纯 HTTP 请求读取企业微信 CalDAV 日程（不依赖 caldav 库版本）
+
+        企业微信 CalDAV 的特殊行为:
+        - 根路径 / 返回 403，必须用 /.well-known/caldav 进入
+        - calendar-query REPORT 中 calendar-data 返回 404
+        - calendar-multiget REPORT 返回 403
+        - GET 单个 .ics 文件正常返回 200 ✅
+
+        因此用三步走:
+        1. PROPFIND /calendar/ Depth:1 → 获取日历 URL
+        2. calendar-query REPORT → 获取时间范围内的事件 href
+        3. GET 逐个获取 .ics 数据
+        """
+        events_list = []
+        server = "https://caldav.wecom.work"
+        auth = HTTPBasicAuth(username, password)
+        ns = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:caldav"}
+
+        try:
+            # Step 1: PROPFIND 获取日历列表
+            propfind_xml = '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:displayname/></D:prop></D:propfind>'
+            resp = http_requests.request(
+                "PROPFIND", f"{server}/calendar/", auth=auth, data=propfind_xml,
+                headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=30,
+            )
+            if resp.status_code != 207:
+                logger.error(f"企业微信 PROPFIND 失败: {resp.status_code}")
+                return events_list
+
+            root = ET.fromstring(resp.text)
+            calendar_urls = []
+            for response in root.findall(".//D:response", ns):
+                href = response.find("D:href", ns)
+                # 寻找 CalDAV 日历资源（有 <calendar/> resourcetype）
+                rt = response.find(".//C:calendar", {"C": "urn:ietf:params:xml:ns:caldav"})
+                if rt is None:
+                    # 尝试用 A 前缀（企微用 A 命名空间）
+                    for propstat in response.findall("D:propstat", ns):
+                        prop = propstat.find("D:prop", ns)
+                        if prop is not None:
+                            rt_el = prop.find("D:resourcetype", ns)
+                            if rt_el is not None:
+                                for child in rt_el:
+                                    if "calendar" in child.tag.lower():
+                                        rt = child
+                                        break
+                if href is not None and href.text and rt is not None:
+                    # 排除 inbox/outbox/principal
+                    if "inbox" not in href.text and "outbox" not in href.text:
+                        calendar_urls.append(href.text)
+                        logger.info(f"发现企业微信日历: {href.text}")
+
+            if not calendar_urls:
+                logger.warning("未找到企业微信日历")
+                return events_list
+
+            # Step 2: calendar-query 获取事件 href 列表
+            now = datetime.utcnow()
+            start_str = (now - timedelta(days=days_ahead)).strftime("%Y%m%dT%H%M%SZ")
+            end_str = (now + timedelta(days=days_ahead)).strftime("%Y%m%dT%H%M%SZ")
+
+            for cal_path in calendar_urls:
+                cal_url = f"{server}{cal_path}"
+
+                query_xml = f'''<?xml version="1.0"?>
+<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:">
+  <D:prop><D:getetag/></D:prop>
+  <C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT">
+    <C:time-range start="{start_str}" end="{end_str}"/>
+  </C:comp-filter></C:comp-filter></C:filter>
+</C:calendar-query>'''
+
+                resp = http_requests.request(
+                    "REPORT", cal_url, auth=auth, data=query_xml,
+                    headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=30,
+                )
+                if resp.status_code != 207:
+                    logger.warning(f"企业微信 calendar-query 失败: {resp.status_code}")
+                    continue
+
+                root = ET.fromstring(resp.text)
+                hrefs = []
+                for response in root.findall(".//D:response", ns):
+                    href = response.find("D:href", ns)
+                    if href is not None and href.text and href.text.endswith(".ics"):
+                        hrefs.append(href.text)
+
+                if not hrefs:
+                    logger.info(f"企业微信日历 {cal_path} 无事件")
+                    continue
+
+                logger.info(f"企业微信日历 {cal_path} 找到 {len(hrefs)} 个事件")
+
+                # Step 3: GET 逐个获取 .ics
+                for href in hrefs:
+                    try:
+                        resp = http_requests.get(
+                            f"{server}{href}", auth=auth, timeout=30,
+                        )
+                        if resp.status_code != 200:
+                            logger.debug(f"GET {href} 失败: {resp.status_code}")
+                            continue
+
+                        ical = iCalendar.from_ical(resp.text)
+                        for component in ical.walk():
+                            if component.name != "VEVENT":
+                                continue
+                            summary = str(component.get("summary", "")).strip()
+                            dt_start = component.get("dtstart")
+                            dt_end = component.get("dtend")
+                            if not summary or not dt_start:
+                                continue
+                            events_list.append({
+                                "summary": summary,
+                                "dtstart": dt_start.dt,
+                                "dtend": dt_end.dt if dt_end else None,
+                                "description": str(component.get("description", "")),
+                                "location": str(component.get("location", "")),
+                                "transp": str(component.get("transp", "OPAQUE")).upper(),
+                                "uid": str(component.get("uid", "")),
+                            })
+                    except Exception as e:
+                        logger.debug(f"获取/解析企微事件失败: {e}")
+                        continue
+
+        except Exception as e:
+            logger.error(f"读取企业微信日程失败: {e}")
+
+        return events_list
+
     def sync_wecom(self):
-        """同步企业微信日程到 iCloud"""
+        """同步企业微信日程到 iCloud（使用纯 HTTP 方式）"""
         if not config.is_wecom_enabled():
             logger.debug("企业微信同步未启用")
             return 0
@@ -2228,22 +2360,13 @@ class ExternalCalendarSync:
         print("🔄 同步企业微信日程...")
         username = config.get("wecom_caldav_username")
         password = config.get("wecom_caldav_password")
-        calendar_name = config.get("wecom_calendar_name", "")
 
-        principal = self._connect_external_caldav(
-            "https://caldav.wecom.work/.well-known/caldav",
-            username,
-            password,
-        )
-        if not principal:
-            print("❌ 企业微信 CalDAV 连接失败")
-            return 0
-
-        events = self._read_events_from_external(principal, calendar_name)
+        events = self._read_wecom_events_raw(username, password)
         if not events:
             print("  📭 企业微信无待同步日程")
             return 0
 
+        print(f"  📥 读取到 {len(events)} 个企业微信日程")
         icloud_cal = self._get_icloud_calendar()
         if not icloud_cal:
             print("❌ 无法获取 iCloud 日历")

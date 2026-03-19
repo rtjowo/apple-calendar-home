@@ -312,20 +312,27 @@ for cal_path in calendar_urls:
                         print(f"    ✅ {c.get('summary')} ({c.get('dtstart').dt})")
 ```
 
-#### 6. WeCom (企业微信) can use the caldav library normally
+#### 6. WeCom (企业微信) also requires RAW HTTP — different pattern from Feishu (CRITICAL)
 
-WeCom CalDAV supports standard `calendar-query` with `calendar-data` and individual `GET`. Use the caldav library's `search()` for WeCom:
+WeCom CalDAV has its own non-standard behavior, different from Feishu:
 
-```python
-client = DAVClient(url="https://caldav.wecom.work/.well-known/caldav", username=username, password=password, timeout=30)
-principal = client.principal()
-calendars = principal.calendars()
-for cal in calendars:
-    events = cal.search(start=start, end=end, event=True)
-    for event in events:
-        ical_data = event.data
-        ...
+| Operation | Feishu | WeCom |
+|-----------|--------|-------|
+| `calendar-query` with `calendar-data` | ❌ 404 | ❌ 404 |
+| `GET` individual `.ics` | ❌ 403 | ✅ 200 |
+| `calendar-multiget` | ✅ 200 | ❌ 403 |
+| Root URL `/` | ✅ works | ❌ 403 (must use `/.well-known/caldav`) |
+
+**WeCom 3-step flow (different from Feishu!):**
 ```
+Step 1: PROPFIND /calendar/ Depth:1 → get calendar URLs
+Step 2: calendar-query REPORT → get event href list (etag only, no data)
+Step 3: GET each .ics file individually → get calendar data ✅
+```
+
+Do NOT use `calendar-multiget` for WeCom (returns 403). Do NOT use the caldav library for WeCom (root URL 403 breaks `principal()`).
+
+See `_read_wecom_events_raw()` in `source_code.md` for the exact implementation.
 
 ## Core Architecture
 
@@ -470,11 +477,11 @@ Sync WeCom/Feishu events to user's iCloud private calendar via CalDAV.
 - **Periodic sync**: Daemon calls `_maybe_sync_external()` every 30 minutes automatically.
 - **WeCom CalDAV server**: `https://caldav.wecom.work/.well-known/caldav` (root `/` returns 403, must use well-known endpoint)
 - **Feishu CalDAV server**: User-provided (varies by organization). Code MUST auto-prepend `https://` if missing.
-- **⚠️ Feishu uses RAW HTTP, not caldav library**: `sync_feishu()` calls `_read_feishu_events_raw()` which uses pure `requests` library with PROPFIND → calendar-query → calendar-multiget flow. This bypasses all caldav library version issues.
-- **⚠️ WeCom uses caldav library normally**: `sync_wecom()` uses standard caldav `search()`.
-- **⚠️ MUST use `calendar.search(start=start, end=end, event=True)`** for WeCom — NOT `date_search()` which is deprecated.
-- **⚠️ Time range for reading**: Use ±30 days (NOT just 7 days forward).
-- **⚠️ DAVClient timeout**: Always set `timeout=30` — external CalDAV servers can be slow.
+- **⚠️ Both Feishu and WeCom use RAW HTTP, not caldav library**: Neither server fully supports standard CalDAV protocol. Each has a dedicated `_read_xxx_events_raw()` method using pure `requests`.
+- **⚠️ Feishu flow**: PROPFIND → calendar-query → **calendar-multiget** (Feishu blocks GET but supports multiget)
+- **⚠️ WeCom flow**: PROPFIND /calendar/ → calendar-query → **GET each .ics** (WeCom blocks multiget but supports GET)
+- **⚠️ WeCom root URL**: Must use `/.well-known/caldav` or `/calendar/` — root `/` returns 403
+- **⚠️ Time range**: Use ±30 days. **⚠️ DAVClient timeout**: Always set `timeout=30`.
 
 ### 3. Daemon (`daemon.py`) — REFACTORED
 

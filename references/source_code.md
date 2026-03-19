@@ -1967,6 +1967,9 @@ class ExternalCalendarSync:
                     for event in events:
                         try:
                             ical_data = event.data
+                            if not ical_data:
+                                logger.debug(f"事件数据为空，跳过 (可能 GET 被拒绝，但 REPORT 未包含数据)")
+                                continue
                             ical = iCalendar.from_ical(ical_data)
                             for component in ical.walk():
                                 if component.name != "VEVENT":

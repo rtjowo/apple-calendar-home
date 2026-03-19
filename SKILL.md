@@ -295,6 +295,81 @@ Feishu CalDAV can be slow. Always set `timeout=30`:
 client = DAVClient(url=server, username=username, password=password, timeout=30)
 ```
 
+#### 7. Feishu CalDAV returns 403 on individual GET — use REPORT data only (CRITICAL)
+
+Feishu CalDAV blocks GET requests for individual `.ics` files (returns `403 Forbidden`). However, the `REPORT` response already contains inline `calendar-data`. The `caldav` library's `search()` method handles this correctly — the `event.data` property will contain data from the REPORT response even though GET fails.
+
+**NEVER write custom code to fetch individual .ics files from Feishu.** Always use:
+
+```python
+events = cal.search(start=start, end=end, event=True)
+for event in events:
+    ical_data = event.data  # This works — data comes from REPORT, not GET
+    if not ical_data:
+        continue  # Skip if somehow empty
+    ical = iCalendar.from_ical(ical_data)
+    ...
+```
+
+**NEVER do this:**
+```python
+# ❌ WRONG — Feishu returns 403 on direct GET
+response = requests.get(event_url, auth=(username, password))
+# ❌ WRONG — manually fetching .ics files
+for href in event_hrefs:
+    resp = client.request(href)  # Will get 403
+```
+
+#### 8. caldav library version must be >= 1.3.0
+
+The `search()` method with inline `calendar-data` in REPORT requires caldav >= 1.3.0. Always specify in requirements.txt:
+
+```
+caldav>=1.3.0
+```
+
+#### 9. Reading events — complete correct pattern
+
+This is the ONLY correct way to read events from Feishu/WeCom CalDAV:
+
+```python
+from caldav import DAVClient
+from datetime import datetime, timedelta
+from icalendar import Calendar as iCalendar
+
+client = DAVClient(url=server_url, username=username, password=password, timeout=30)
+principal = client.principal()
+calendars = principal.calendars()
+
+now = datetime.now()
+start = now - timedelta(days=30)
+end = now + timedelta(days=30)
+
+all_events = []
+for cal in calendars:
+    events = cal.search(start=start, end=end, event=True)
+    for event in events:
+        ical_data = event.data
+        if not ical_data:
+            continue
+        ical = iCalendar.from_ical(ical_data)
+        for component in ical.walk():
+            if component.name != "VEVENT":
+                continue
+            summary = str(component.get("summary", "")).strip()
+            dt_start = component.get("dtstart")
+            dt_end = component.get("dtend")
+            if not summary or not dt_start:
+                continue
+            all_events.append({
+                "summary": summary,
+                "dtstart": dt_start.dt,
+                "dtend": dt_end.dt if dt_end else None,
+            })
+```
+
+**Do NOT deviate from this pattern.** Do NOT add extra HTTP requests, do NOT try alternative fetch methods, do NOT use `events()` method (which also triggers individual GETs). Do NOT access `event.vobject_instance` or `event.icalendar_instance` — these may trigger a re-fetch via GET which will fail with 403 on Feishu. Always use `event.data` (string) and parse with `iCalendar.from_ical()`.
+
 ## Core Architecture
 
 ```

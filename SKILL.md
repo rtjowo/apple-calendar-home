@@ -317,7 +317,7 @@ for cal_path in calendar_urls:
 WeCom CalDAV supports standard `calendar-query` with `calendar-data` and individual `GET`. Use the caldav library's `search()` for WeCom:
 
 ```python
-client = DAVClient(url="https://caldav.wecom.work", username=username, password=password, timeout=30)
+client = DAVClient(url="https://caldav.wecom.work/.well-known/caldav", username=username, password=password, timeout=30)
 principal = client.principal()
 calendars = principal.calendars()
 for cal in calendars:
@@ -389,7 +389,7 @@ for cal in calendars:
   CalendarReader 正常读取 → 被 StatusWall 感知
 ```
 
-**WeCom CalDAV 配置方法**: 企业微信 → 日程 → 更多 → 设置 → 同步到系统日历 → 获取用户名和密码，服务器为 `caldav.wecom.work`
+**WeCom CalDAV 配置方法**: 企业微信 → 日程 → 更多 → 设置 → 同步到系统日历 → 获取用户名和密码，服务器为 `caldav.wecom.work`（代码中需使用 `https://caldav.wecom.work/.well-known/caldav`，根路径会 403）
 
 **Feishu CalDAV 配置方法**: 飞书 → 设置 → 日历 → 第三方日历管理 → CalDAV 同步 → 获取用户名、密码和服务器地址
 
@@ -468,7 +468,7 @@ Sync WeCom/Feishu events to user's iCloud private calendar via CalDAV.
 - **UUID-based UID**: Each synced event gets `sw-sync-{uuid4}@status-wall` UID.
 - **All-day event handling**: Properly handles both timed events and all-day events (date vs datetime).
 - **Periodic sync**: Daemon calls `_maybe_sync_external()` every 30 minutes automatically.
-- **WeCom CalDAV server**: `https://caldav.wecom.work`
+- **WeCom CalDAV server**: `https://caldav.wecom.work/.well-known/caldav` (root `/` returns 403, must use well-known endpoint)
 - **Feishu CalDAV server**: User-provided (varies by organization). Code MUST auto-prepend `https://` if missing.
 - **⚠️ Feishu uses RAW HTTP, not caldav library**: `sync_feishu()` calls `_read_feishu_events_raw()` which uses pure `requests` library with PROPFIND → calendar-query → calendar-multiget flow. This bypasses all caldav library version issues.
 - **⚠️ WeCom uses caldav library normally**: `sync_wecom()` uses standard caldav `search()`.

@@ -2231,7 +2231,7 @@ class ExternalCalendarSync:
         calendar_name = config.get("wecom_calendar_name", "")
 
         principal = self._connect_external_caldav(
-            "https://caldav.wecom.work",
+            "https://caldav.wecom.work/.well-known/caldav",
             username,
             password,
         )

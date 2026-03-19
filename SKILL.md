@@ -5,6 +5,36 @@ description: "This skill should be used when the user wants to build an Apple iC
 
 # Apple iCloud 状态墙 (Status Wall) v2.0
 
+## ⛔⛔⛔ MANDATORY RULES — READ BEFORE WRITING ANY CODE ⛔⛔⛔
+
+**These rules MUST be followed. Violating them will cause runtime failures.**
+
+### Rule 1: Feishu CalDAV timeout MUST be 120 seconds (NOT 30, NOT 60)
+
+```python
+# ❌ WRONG — will timeout, Feishu server is extremely slow from cloud
+timeout=30
+timeout=60
+requests.request("REPORT", url, timeout=30)
+
+# ✅ CORRECT — Feishu needs 120s minimum
+TIMEOUT = 120
+MAX_RETRIES = 3
+requests.request("REPORT", url, timeout=120)
+```
+
+Feishu CalDAV server (`caldav.feishu.cn`) responds very slowly from cloud/overseas servers. **Every single HTTP request to Feishu MUST use `timeout=120`**. The `_request_with_retry()` helper in `source_code.md` handles this. Never hardcode `timeout=30` anywhere for Feishu.
+
+### Rule 2: Do NOT use `caldav` library for Feishu or WeCom
+
+Only use `caldav` library for iCloud. Use raw `requests` HTTP for Feishu and WeCom. See details below.
+
+### Rule 3: External calendar sync writes to SHARED calendar (not private)
+
+Feishu/WeCom events go into the shared calendar. The old design wrote to private calendar — that is WRONG.
+
+---
+
 ## Overview
 
 This skill provides the complete knowledge and implementation patterns for building an **Apple iCloud Status Wall** — an automated system that aggregates the user's calendar events from multiple platforms (iCloud, WeCom/企业微信, Feishu/飞书) and syncs status to an iCloud shared calendar. Family or friends can see the user's current status by subscribing to the shared calendar.
@@ -324,6 +354,8 @@ if not server.startswith("http"):
 
 #### 5. Feishu CalDAV connection test template
 
+**⛔ REMINDER: ALL requests to Feishu MUST use `timeout=120`. Using 30 or 60 WILL fail.**
+
 When testing Feishu CalDAV, use EXACTLY this raw HTTP pattern (NOT the caldav library):
 
 ```python
@@ -344,7 +376,7 @@ ns = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:caldav"}
 principal_url = f"{server}/{feishu_username}/"
 propfind_xml = '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>'
 resp = requests.request("PROPFIND", principal_url, auth=auth, data=propfind_xml,
-                        headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=30)
+                        headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=120)  # ⛔ 必须120s
 
 root = ET.fromstring(resp.text)
 calendar_urls = []
@@ -369,7 +401,7 @@ for cal_path in calendar_urls:
   </C:comp-filter></C:comp-filter></C:filter>
 </C:calendar-query>'''
     resp = requests.request("REPORT", cal_url, auth=auth, data=query_xml,
-                            headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=30)
+                            headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=120)  # ⛔ 必须120s
     root = ET.fromstring(resp.text)
     hrefs = [r.find("D:href", ns).text for r in root.findall(".//D:response", ns)
              if r.find("D:href", ns) is not None and r.find("D:href", ns).text]
@@ -386,7 +418,7 @@ for cal_path in calendar_urls:
 {href_els}
 </C:calendar-multiget>'''
     resp = requests.request("REPORT", cal_url, auth=auth, data=multiget_xml,
-                            headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=30)
+                            headers={"Content-Type": "application/xml", "Depth": "1"}, timeout=120)  # ⛔ 必须120s
     root = ET.fromstring(resp.text)
     for response in root.findall(".//D:response", ns):
         for propstat in response.findall("D:propstat", ns):
@@ -577,7 +609,7 @@ Sync WeCom/Feishu events to user's iCloud **shared calendar** (NOT private calen
 - **WeCom CalDAV server**: `https://caldav.wecom.work/.well-known/caldav` (root `/` returns 403, must use well-known endpoint)
 - **Feishu CalDAV server**: User-provided (varies by organization). Code MUST auto-prepend `https://` if missing.
 - **⚠️ Both Feishu and WeCom use RAW HTTP, not caldav library**: Neither server fully supports standard CalDAV protocol. Each has a dedicated `_read_xxx_events_raw()` method using pure `requests`.
-- **⚠️ Feishu flow**: PROPFIND → calendar-query → **calendar-multiget** (Feishu blocks GET but supports multiget). **Timeout must be 120s** (not 30s or 60s) with 3 retries — Feishu CalDAV is extremely slow from cloud servers.
+- **⚠️ Feishu flow**: PROPFIND → calendar-query → **calendar-multiget** (Feishu blocks GET but supports multiget). **Timeout MUST be 120s** with 3 retries — Feishu CalDAV is extremely slow. **NEVER use 30s or 60s for Feishu — it WILL timeout.**
 - **⚠️ WeCom flow**: PROPFIND /calendar/ → calendar-query → **GET each .ics** (WeCom blocks multiget but supports GET)
 - **⚠️ WeCom root URL**: Must use `/.well-known/caldav` or `/calendar/` — root `/` returns 403
 - **⚠️ Time range**: Use ±30 days. **⚠️ DAVClient timeout**: Always set `timeout=30`.

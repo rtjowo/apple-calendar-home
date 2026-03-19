@@ -1571,7 +1571,7 @@ class CalendarReader:
             end = now + timedelta(hours=24)
 
             try:
-                events = private_cal.date_search(start=start, end=end)
+                events = private_cal.search(start=start, end=end, event=True)
             except Exception as e:
                 logger.warning(f"搜索日程失败，尝试重连: {e}")
                 self.principal = None
@@ -1581,7 +1581,7 @@ class CalendarReader:
                 private_cal = calendars[0] if calendars else None
                 if not private_cal:
                     return None
-                events = private_cal.date_search(start=start, end=end)
+                events = private_cal.search(start=start, end=end, event=True)
 
             for event in events:
                 try:
@@ -1730,13 +1730,13 @@ class CalendarWriter:
             tomorrow = today + timedelta(days=1)
 
             try:
-                events = self.target_calendar.date_search(start=today, end=tomorrow)
+                events = self.target_calendar.search(start=today, end=tomorrow, event=True)
             except Exception as e:
                 logger.warning(f"搜索事件失败，尝试重连: {e}")
                 self.target_calendar = None
                 if not self._ensure_connected():
                     return False
-                events = self.target_calendar.date_search(start=today, end=tomorrow)
+                events = self.target_calendar.search(start=today, end=tomorrow, event=True)
 
             deleted_count = 0
             for event in events:
@@ -1930,7 +1930,7 @@ class ExternalCalendarSync:
             for cal in target_calendars:
                 try:
                     logger.info(f"读取日历: {cal.name}")
-                    events = cal.date_search(start=start, end=end)
+                    events = cal.search(start=start, end=end, event=True)
                     for event in events:
                         try:
                             ical_data = event.data
@@ -1971,7 +1971,7 @@ class ExternalCalendarSync:
             now = datetime.now()
             start = now - timedelta(hours=1)
             end = now + timedelta(days=8)
-            events = icloud_cal.date_search(start=start, end=end)
+            events = icloud_cal.search(start=start, end=end, event=True)
 
             deleted = 0
             for event in events:

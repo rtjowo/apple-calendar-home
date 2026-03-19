@@ -1,6 +1,6 @@
 ---
 name: apple-calendar-home
-description: "This skill should be used when the user wants to build an Apple iCloud Status Wall (iCloud 日历状态墙) project — an automated status update system that syncs real-time status (calendar events, GPS location, commute detection) to an iCloud shared calendar. It covers the full project architecture including iCloud Find My location, CalDAV calendar read/write, AMap reverse geocoding, geofence-based commute detection, and daemon process management."
+description: "This skill should be used when the user wants to build an Apple iCloud Status Wall (iCloud 日历状态墙) project — an automated system that aggregates calendar events from multiple platforms (iCloud, WeCom/企业微信, Feishu/飞书) and syncs status to an iCloud shared calendar so family can see the user's real-time schedule. Core feature only requires Apple ID + app-specific password. Optional features include WeCom/Feishu calendar sync via CalDAV, and GPS location via iCloud Find My + AMap reverse geocoding with geofence-based commute detection."
 ---
 
 # Apple iCloud 状态墙 (Status Wall) v2.0
@@ -9,7 +9,50 @@ description: "This skill should be used when the user wants to build an Apple iC
 
 This skill provides the complete knowledge and implementation patterns for building an **Apple iCloud Status Wall** — an automated system that aggregates the user's calendar events from multiple platforms (iCloud, WeCom/企业微信, Feishu/飞书) and syncs status to an iCloud shared calendar. Family or friends can see the user's current status by subscribing to the shared calendar.
 
-**v2.0 新特性**: 模块化分层架构，GPS 定位为可选功能。
+**v2.0 架构**: 模块化分层设计，仅 iCloud 日历为必填，企业微信/飞书同步和 GPS 定位均为可选功能。
+
+## User Onboarding Guide
+
+When a user activates this skill, present the following layered setup guide:
+
+```
+🍎 Apple iCloud 状态墙 — 你需要准备什么？
+
+【必填】iCloud 日历基础功能
+┌─────────────────┬──────────────────────────────────────────┐
+│ Apple ID 邮箱    │ 你的 Apple 账号邮箱                        │
+│ 应用专用密码      │ appleid.apple.com → 登录 → 应用专用密码 → 生成│
+└─────────────────┴──────────────────────────────────────────┘
+  ⚠️ 注意：是「应用专用密码」，不是你的 Apple ID 登录密码！
+  ⚠️ 还需要在 iCloud 日历中创建一个「共享日历」并邀请家人
+
+【可选】企业微信日程同步
+┌─────────────────┬──────────────────────────────────────────┐
+│ CalDAV 用户名     │ 企业微信 → 日程 → ⋯ → 设置 → 同步到系统日历   │
+│ CalDAV 密码       │ 同上页面获取                               │
+└─────────────────┴──────────────────────────────────────────┘
+
+【可选】飞书日程同步
+┌─────────────────┬──────────────────────────────────────────┐
+│ CalDAV 用户名     │ 飞书 → 设置 → 日历 → 第三方日历管理 → CalDAV  │
+│ CalDAV 密码       │ 同上页面获取                               │
+│ CalDAV 服务器     │ 同上页面获取                               │
+└─────────────────┴──────────────────────────────────────────┘
+
+【可选】GPS 定位（在家/公司/通勤状态）
+┌─────────────────┬──────────────────────────────────────────┐
+│ Apple ID 主密码   │ 你的 Apple 登录密码（用于 Find My 定位）      │
+│ 高德 API Key     │ lbs.amap.com → 控制台 → 应用管理 → 创建应用  │
+│ 家的经纬度       │ 高德地图网页版右键点击获取                      │
+│ 公司的经纬度     │ 同上                                       │
+└─────────────────┴──────────────────────────────────────────┘
+  💡 如果你只需要展示日程状态，不需要配置这部分
+
+安装步骤：
+  1. status_wall init       # 交互式配置（会引导你选择启用哪些功能）
+  2. status_wall sync       # 同步企业微信/飞书日程（如已配置）
+  3. status_wall start      # 启动守护进程
+```
 
 ## Core Architecture
 

@@ -898,31 +898,27 @@ class StatusWallDaemon:
             self._last_sync_time = now
 
     def run_once(self):
-        """单次执行状态更新 — 4 级优先级判断"""
+        """单次执行状态更新 — 4 级优先级: P1 私人日历 > P2 共享日历 > P3 GPS > P4 空闲"""
         try:
             logger.info("-" * 40)
             logger.info("开始状态更新轮询")
 
-            # 0. 定期同步外部日历
+            # 0. 定期同步外部日历（飞书/企微 → 共享日历）
             self._maybe_sync_external()
 
-            # 1. 获取当前所有活跃日程（含来源分类）
-            active_events = []
+            # 1. 读取私人日历和共享日历的当前活跃事件
+            events = {"private": [], "shared": []}
             try:
-                active_events = self.calendar_reader.get_current_events()
+                events = self.calendar_reader.get_current_events()
             except Exception as e:
                 logger.warning(f"读取日程异常(非致命): {e}")
-
-            # 分离原生事件和同步事件
-            native_events = [(n, b, s) for n, b, s in active_events if s == "native"]
-            synced_events = [(n, b, s) for n, b, s in active_events if s == "synced"]
 
             location = None
             status = None
 
-            # P1: iCloud 原生日程（最高优先级）
-            if native_events:
-                event_name, is_busy, _ = native_events[0]
+            # P1: 私人日历有日程（最高优先级）
+            if events["private"]:
+                event_name, is_busy, _ = events["private"][0]
                 emoji = "🚫" if is_busy else "📅"
                 suffix = " (勿扰)" if is_busy else ""
                 status = {
@@ -932,11 +928,11 @@ class StatusWallDaemon:
                     "location": "",
                     "commute_mode": False,
                 }
-                logger.info(f"P1 原生日程: {event_name}")
+                logger.info(f"P1 私人日程: {event_name}")
 
-            # P2: 飞书/企微同步日程
-            elif synced_events:
-                event_name, is_busy, _ = synced_events[0]
+            # P2: 共享日历有日程（飞书/企微同步过来的）
+            elif events["shared"]:
+                event_name, is_busy, _ = events["shared"][0]
                 emoji = "🚫" if is_busy else "📅"
                 suffix = " (勿扰)" if is_busy else ""
                 status = {
@@ -946,7 +942,7 @@ class StatusWallDaemon:
                     "location": "",
                     "commute_mode": False,
                 }
-                logger.info(f"P2 同步日程: {event_name}")
+                logger.info(f"P2 共享日程: {event_name}")
 
             # P3: GPS 定位（可选）
             elif self.location_service and self.amap_service:
@@ -967,7 +963,7 @@ class StatusWallDaemon:
                 else:
                     logger.warning("无法获取位置信息")
 
-            # 使用 state_manager 处理定位状态（P3），或降级到 P4
+            # 用 state_manager 处理定位状态（P3），或降级到 P4
             if status is None:
                 if self.state_manager and location:
                     status = self.state_manager.determine_state(location, None)
@@ -1534,7 +1530,11 @@ class AMapService:
 ## status_wall/calendar_reader.py
 
 ```python
-""" 日历读取模块 读取 iCloud 私人日历获取当前日程，区分原生事件和同步事件 """
+"""
+日历读取模块
+读取 iCloud 私人日历和共享日历，获取当前活跃日程。
+区分来源：私人日历事件（native）和共享日历中的同步事件（synced）。
+"""
 import logging
 from datetime import datetime, timedelta, date, timezone
 from caldav import DAVClient
@@ -1548,7 +1548,7 @@ SYNC_TAGS = ("[企微]", "[飞书]")
 
 
 class CalendarReader:
-    """日历读取器 — 带连接复用和健壮的时间处理，支持事件来源分类"""
+    """日历读取器 — 读取私人+共享日历，区分事件来源"""
 
     def __init__(self):
         self.client = None
@@ -1591,7 +1591,6 @@ class CalendarReader:
         """
         if isinstance(dt_val, datetime):
             if dt_val.tzinfo is not None:
-                # 先转到 UTC，再去掉时区信息以统一比较
                 dt_val = dt_val.astimezone(timezone.utc).replace(tzinfo=None)
             return dt_val
         if isinstance(dt_val, date):
@@ -1599,156 +1598,187 @@ class CalendarReader:
         return None
 
     @staticmethod
-    def _classify_event(summary):
-        """
-        判断事件来源
-        返回: "native" (用户自己的) 或 "synced" (从飞书/企微同步的)
-        """
+    def _is_synced_event(summary):
+        """判断是否是从飞书/企微同步过来的事件"""
         for tag in SYNC_TAGS:
             if summary.startswith(tag):
-                return "synced"
-        return "native"
+                return True
+        return False
+
+    @staticmethod
+    def _is_status_event(summary):
+        """判断是否是状态墙写入的置顶状态事件（需要排除）"""
+        status_emojis = {"🏠", "🏢", "🚗", "📍", "🚫", "📅", "❓", "✅"}
+        for emoji in status_emojis:
+            if summary.startswith(emoji):
+                return True
+        return False
+
+    def _find_private_calendar(self, calendars):
+        """找到私人日历（排除共享日历）"""
+        target_name = config.get("private_calendar_name", "")
+        shared_name = config.get("shared_calendar_name", "Status Wall").lower()
+
+        # 精确匹配目标名称
+        if target_name:
+            for cal in calendars:
+                cal_name = cal.name or ""
+                if target_name.lower() in cal_name.lower():
+                    return cal
+
+        # 排除共享日历后取第一个
+        for cal in calendars:
+            cal_name = (cal.name or "").lower()
+            if shared_name not in cal_name:
+                return cal
+
+        return None
+
+    def _find_shared_calendar(self, calendars):
+        """找到共享日历"""
+        shared_name = config.get("shared_calendar_name", "Status Wall").lower()
+
+        for cal in calendars:
+            cal_name = (cal.name or "").lower()
+            if shared_name in cal_name:
+                return cal
+
+        return None
+
+    def _extract_active_events(self, calendar, now, start, end, source_label):
+        """
+        从指定日历中提取当前活跃的事件
+        source_label: "private" 或 "shared"
+        返回: [(summary, is_busy, source), ...]
+              source: "native" | "synced"
+        """
+        active = []
+        try:
+            events = calendar.search(start=start, end=end, event=True)
+        except Exception as e:
+            logger.warning(f"搜索 {source_label} 日历失败: {e}")
+            return active
+
+        for event in events:
+            try:
+                ical_data = event.data
+                if not ical_data:
+                    continue
+                cal = iCalendar.from_ical(ical_data)
+                for component in cal.walk():
+                    if component.name != "VEVENT":
+                        continue
+
+                    event_start = component.get("dtstart")
+                    event_end = component.get("dtend")
+                    summary = str(component.get("summary", "")).strip()
+
+                    if not event_start or not summary:
+                        continue
+
+                    # 跳过状态墙自己写入的置顶状态事件
+                    if self._is_status_event(summary):
+                        continue
+
+                    dt_start = self._to_naive_datetime(event_start.dt)
+                    if dt_start is None:
+                        continue
+
+                    if event_end:
+                        dt_end = self._to_naive_datetime(event_end.dt)
+                    else:
+                        dt_end = dt_start + timedelta(days=1)
+
+                    if dt_end is None:
+                        continue
+
+                    # 全天事件跳过
+                    if isinstance(event_start.dt, date) and not isinstance(event_start.dt, datetime):
+                        continue
+
+                    # 检查当前时间是否在事件范围内
+                    if dt_start <= now <= dt_end:
+                        transp = str(component.get("transp", "OPAQUE")).upper()
+                        is_busy = (transp == "OPAQUE")
+
+                        # 判断事件来源
+                        if source_label == "private":
+                            source = "native"
+                        else:
+                            # 共享日历中：带 [企微]/[飞书] 前缀的是同步事件
+                            source = "synced" if self._is_synced_event(summary) else "native"
+
+                        active.append((summary, is_busy, source))
+                        logger.info(f"活跃日程[{source_label}]: {summary} (source={source})")
+
+            except Exception as e:
+                logger.debug(f"解析事件失败: {e}")
+                continue
+
+        return active
 
     def get_current_events(self):
         """
-        获取当前正在进行的所有日程，并分类来源
-        返回: [(event_name: str, is_busy: bool, source: str), ...]
-              source 为 "native" 或 "synced"
+        获取当前正在进行的所有日程，同时读取私人日历和共享日历
+        返回: {
+            "private": [(summary, is_busy, "native"), ...],   — 私人日历的事件
+            "shared": [(summary, is_busy, source), ...],      — 共享日历的事件
+        }
         """
+        result = {"private": [], "shared": []}
+
         try:
             if not self._ensure_connected():
-                return []
+                return result
 
             calendars = self.principal.calendars()
             if not calendars:
                 logger.warning("未找到日历")
-                return []
-
-            # 查找目标日历
-            target_name = config.get("private_calendar_name", "")
-            private_cal = None
-            shared_name = config.get("shared_calendar_name", "Status Wall").lower()
-
-            for cal in calendars:
-                cal_name = cal.name or ""
-                # 精确匹配目标名称
-                if target_name and target_name.lower() in cal_name.lower():
-                    private_cal = cal
-                    break
-                # 跳过共享状态日历
-                if not target_name and shared_name not in cal_name.lower():
-                    private_cal = cal
-                    break
-
-            if not private_cal:
-                # 最后兜底：第一个不是共享日历的
-                for cal in calendars:
-                    cal_name = (cal.name or "").lower()
-                    if shared_name not in cal_name:
-                        private_cal = cal
-                        break
-                if not private_cal:
-                    private_cal = calendars[0]
-
-            logger.debug(f"使用日历: {private_cal.name}")
+                return result
 
             now = datetime.now()
-            # 扩大搜索范围以覆盖全天事件
             start = now - timedelta(hours=24)
             end = now + timedelta(hours=24)
 
-            try:
-                events = private_cal.search(start=start, end=end, event=True)
-            except Exception as e:
-                logger.warning(f"搜索日程失败，尝试重连: {e}")
-                self.principal = None
-                if not self._ensure_connected():
-                    return []
-                calendars = self.principal.calendars()
-                private_cal = calendars[0] if calendars else None
-                if not private_cal:
-                    return []
-                events = private_cal.search(start=start, end=end, event=True)
+            # 读取私人日历
+            private_cal = self._find_private_calendar(calendars)
+            if private_cal:
+                logger.debug(f"读取私人日历: {private_cal.name}")
+                result["private"] = self._extract_active_events(private_cal, now, start, end, "private")
+            else:
+                logger.warning("未找到私人日历")
 
-            active_events = []
-
-            for event in events:
-                try:
-                    ical_data = event.data
-                    if not ical_data:
-                        continue
-                    cal = iCalendar.from_ical(ical_data)
-                    for component in cal.walk():
-                        if component.name != "VEVENT":
-                            continue
-
-                        event_start = component.get("dtstart")
-                        event_end = component.get("dtend")
-                        summary = str(component.get("summary", "")).strip()
-
-                        if not event_start or not summary:
-                            continue
-
-                        dt_start = self._to_naive_datetime(event_start.dt)
-                        if dt_start is None:
-                            continue
-
-                        # 如果没有 dtend，默认结束时间
-                        if event_end:
-                            dt_end = self._to_naive_datetime(event_end.dt)
-                        else:
-                            # 全天事件没有 dtend 时默认当天结束
-                            dt_end = dt_start + timedelta(days=1)
-
-                        if dt_end is None:
-                            continue
-
-                        # 全天事件：跳过（不应该显示为忙碌）
-                        if isinstance(event_start.dt, date) and not isinstance(event_start.dt, datetime):
-                            continue
-
-                        # 检查当前时间是否在事件范围内
-                        if dt_start <= now <= dt_end:
-                            transp = str(component.get("transp", "OPAQUE")).upper()
-                            is_busy = (transp == "OPAQUE")
-                            source = self._classify_event(summary)
-                            active_events.append((summary, is_busy, source))
-                            logger.info(f"活跃日程: {summary} (busy={is_busy}, source={source})")
-
-                except Exception as e:
-                    logger.debug(f"解析事件失败: {e}")
-                    continue
-
-            if not active_events:
-                logger.debug("当前无进行中的日程")
-
-            return active_events
+            # 读取共享日历
+            shared_cal = self._find_shared_calendar(calendars)
+            if shared_cal:
+                logger.debug(f"读取共享日历: {shared_cal.name}")
+                result["shared"] = self._extract_active_events(shared_cal, now, start, end, "shared")
+            else:
+                logger.debug("未找到共享日历，跳过")
 
         except Exception as e:
             logger.error(f"读取日程失败: {e}")
-            # 标记连接失效
             self.principal = None
-            return []
+
+        return result
 
     def get_current_event(self):
         """
         获取当前正在进行的日程（兼容旧接口）
         返回: (event_name: str, is_busy: bool) 或 None
-        优先级: P1 native > P2 synced
+        优先级: P1 私人日历 > P2 共享日历
         """
-        active_events = self.get_current_events()
-        if not active_events:
-            return None
+        events = self.get_current_events()
 
-        # P1: 优先返回原生事件
-        for name, is_busy, source in active_events:
-            if source == "native":
-                return (name, is_busy)
+        # P1: 私人日历
+        if events["private"]:
+            name, is_busy, _ = events["private"][0]
+            return (name, is_busy)
 
-        # P2: 其次返回同步事件
-        for name, is_busy, source in active_events:
-            if source == "synced":
-                return (name, is_busy)
+        # P2: 共享日历（飞书/企微同步的日程）
+        if events["shared"]:
+            name, is_busy, _ = events["shared"][0]
+            return (name, is_busy)
 
         return None
 
@@ -1924,8 +1954,8 @@ class CalendarWriter:
 ```python
 """
 外部日历同步模块
-将企业微信/飞书的日程通过 CalDAV 读取后，复制到用户的 iCloud 私人日历中。
-家人通过共享日历即可看到聚合后的日程状态。
+将企业微信/飞书的日程通过 CalDAV 读取后，复制到用户的 iCloud 共享日历中。
+家人打开共享日历即可直接看到飞书/企微的日程。
 """
 
 import logging
@@ -1953,7 +1983,7 @@ class ExternalCalendarSync:
     工作流程:
     1. 通过 CalDAV 连接到企业微信/飞书日历服务器
     2. 读取指定时间范围内的日程
-    3. 将这些日程作为事件写入用户的 iCloud 私人日历
+    3. 将这些日程作为事件写入用户的 iCloud 共享日历（不是私人日历！）
     4. 事件标题加前缀标记来源（[企微] / [飞书]），方便识别和清理
     """
 
@@ -1962,7 +1992,7 @@ class ExternalCalendarSync:
         self.icloud_principal = None
 
     def _connect_icloud(self):
-        """连接到 iCloud CalDAV（用于写入同步事件）"""
+        """连接到 iCloud CalDAV"""
         try:
             username = config.get("icloud_username")
             password = config.get("icloud_app_password")
@@ -1983,8 +2013,8 @@ class ExternalCalendarSync:
             self.icloud_principal = None
             return False
 
-    def _get_icloud_calendar(self, calendar_name=""):
-        """获取 iCloud 目标日历"""
+    def _get_shared_calendar(self):
+        """获取 iCloud 共享日历（飞书/企微日程写入目标）"""
         if not self.icloud_principal:
             if not self._connect_icloud():
                 return None
@@ -1994,21 +2024,21 @@ class ExternalCalendarSync:
             logger.error("iCloud 中没有日历")
             return None
 
-        target_name = calendar_name or config.get("private_calendar_name", "")
-        shared_name = config.get("shared_calendar_name", "Status Wall").lower()
+        shared_name = config.get("shared_calendar_name", "Status Wall")
 
-        # 精确匹配
-        if target_name:
-            for cal in calendars:
-                if cal.name and target_name.lower() in cal.name.lower():
-                    return cal
-
-        # 排除共享日历后取第一个
+        # 精确匹配共享日历名称
         for cal in calendars:
-            cal_name = (cal.name or "").lower()
-            if shared_name not in cal_name:
+            if cal.name and cal.name.strip().lower() == shared_name.strip().lower():
+                logger.info(f"找到共享日历: {cal.name}")
                 return cal
 
+        # 模糊匹配
+        for cal in calendars:
+            if cal.name and shared_name.lower() in cal.name.lower():
+                logger.info(f"找到共享日历(模糊): {cal.name}")
+                return cal
+
+        logger.warning(f"未找到共享日历 '{shared_name}'，使用第一个日历")
         return calendars[0] if calendars else None
 
     def _connect_external_caldav(self, server_url, username, password):
@@ -2442,7 +2472,7 @@ class ExternalCalendarSync:
         return events_list
 
     def sync_wecom(self):
-        """同步企业微信日程到 iCloud（使用纯 HTTP 方式）"""
+        """同步企业微信日程到 iCloud 共享日历（使用纯 HTTP 方式）"""
         if not config.is_wecom_enabled():
             logger.debug("企业微信同步未启用")
             return 0
@@ -2457,20 +2487,20 @@ class ExternalCalendarSync:
             return 0
 
         print(f"  📥 读取到 {len(events)} 个企业微信日程")
-        icloud_cal = self._get_icloud_calendar()
-        if not icloud_cal:
-            print("❌ 无法获取 iCloud 日历")
+        shared_cal = self._get_shared_calendar()
+        if not shared_cal:
+            print("❌ 无法获取 iCloud 共享日历")
             return 0
 
         # 先清理旧的同步事件，再写入新的
-        self._clean_synced_events(icloud_cal, SYNC_TAG_WECOM)
-        written = self._write_events_to_icloud(icloud_cal, events, SYNC_TAG_WECOM)
+        self._clean_synced_events(shared_cal, SYNC_TAG_WECOM)
+        written = self._write_events_to_icloud(shared_cal, events, SYNC_TAG_WECOM)
 
-        print(f"  ✅ 同步了 {written} 个企业微信日程")
+        print(f"  ✅ 同步了 {written} 个企业微信日程到共享日历")
         return written
 
     def sync_feishu(self):
-        """同步飞书日程到 iCloud（使用纯 HTTP 方式，不依赖 caldav 库版本）"""
+        """同步飞书日程到 iCloud 共享日历（使用纯 HTTP 方式，不依赖 caldav 库版本）"""
         if not config.is_feishu_enabled():
             logger.debug("飞书同步未启用")
             return 0
@@ -2496,15 +2526,15 @@ class ExternalCalendarSync:
             return 0
 
         print(f"  📥 读取到 {len(events)} 个飞书日程")
-        icloud_cal = self._get_icloud_calendar()
-        if not icloud_cal:
-            print("❌ 无法获取 iCloud 日历")
+        shared_cal = self._get_shared_calendar()
+        if not shared_cal:
+            print("❌ 无法获取 iCloud 共享日历")
             return 0
 
-        self._clean_synced_events(icloud_cal, SYNC_TAG_FEISHU)
-        written = self._write_events_to_icloud(icloud_cal, events, SYNC_TAG_FEISHU)
+        self._clean_synced_events(shared_cal, SYNC_TAG_FEISHU)
+        written = self._write_events_to_icloud(shared_cal, events, SYNC_TAG_FEISHU)
 
-        print(f"  ✅ 同步了 {written} 个飞书日程")
+        print(f"  ✅ 同步了 {written} 个飞书日程到共享日历")
         return written
 
     def sync_all(self):

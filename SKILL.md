@@ -425,31 +425,30 @@ See `_read_wecom_events_raw()` in `source_code.md` for the exact implementation.
 ```
 ┌──────────────────────────────────────────────────────────┐
 │              共享日历（家人可见）                            │
-│       始终有一个「置顶状态」全天事件，实时更新               │
-│              iCloud Shared Calendar                       │
+│   包含：① 置顶状态事件（实时更新）                          │
+│         ② [企微] 日程（自动同步）                          │
+│         ③ [飞书] 日程（自动同步）                          │
 └────────────────────────▲─────────────────────────────────┘
-                         │ 写入「当前状态」
-┌────────────────────────┴─────────────────────────────────┐
-│                  4 级状态优先级引擎                         │
-│  P1: iCloud 原生日程 → 直接显示                            │
-│  P2: 飞书/企微同步日程 → 显示带 [飞书]/[企微] 标记          │
-│  P3: GPS定位(可选) → 地理围栏 → 在家/公司/通勤/在外         │
-│  P4: 全部没有 → 显示"空闲"                                │
-└──────▲──────────────────────▲────────────────────────────┘
-       │                      │
-┌──────┴──────┐    ┌─────────┴─────────┐
-│  日历读取    │    │  GPS 定位 (可选)   │
-│  CalDAV     │    │  FindMy + 高德地图  │
-│  iCloud     │    │  电子围栏 + 通勤    │
-│  区分原生    │    └───────────────────┘
-│  vs 同步事件 │
-└──────▲──────┘
-       │
-┌──────┴───────────────────────────────┐
-│         外部日历同步 (可选)            │
-│  企业微信 CalDAV → 复制到 iCloud 日历  │
-│  飞书 CalDAV → 复制到 iCloud 日历     │
-└──────────────────────────────────────┘
+                         │ ① 写入置顶状态  ② 写入同步日程
+          ┌──────────────┴──────────────┐
+          │                             │
+┌─────────┴───────────┐    ┌───────────┴───────────────────┐
+│  状态判断引擎        │    │  外部日历同步 (可选)            │
+│  读取私人+共享日历   │    │  飞书 CalDAV → 写入共享日历     │
+│                     │    │  企微 CalDAV → 写入共享日历     │
+│  P1: 私人日历有日程  │    └─────────────────────────────────┘
+│  P2: 共享日历有日程  │
+│  P3: GPS定位(可选)  │
+│  P4: 显示"空闲"     │
+└──────▲──────────────┘
+       │ 读取
+┌──────┴──────────────────────────────┐
+│           iCloud CalDAV              │
+│  ┌────────────┐  ┌────────────────┐ │
+│  │ 私人日历    │  │ 共享日历        │ │
+│  │ (用户日程)  │  │ (同步+状态)    │ │
+│  └────────────┘  └────────────────┘ │
+└─────────────────────────────────────┘
 ```
 
 ### Feature Tiers
@@ -464,17 +463,16 @@ See `_read_wecom_events_raw()` in `source_code.md` for the exact implementation.
 
 The shared calendar ALWAYS has exactly ONE "pinned status" all-day event that reflects the user's current state. This event is updated every polling cycle (15 min). The status is determined by the following priority:
 
-1. **P1 iCloud 原生日程 (Native Calendar Events)** — Read user's private calendar, find events that are NOT tagged with `[企微]` or `[飞书]` prefix. If there's an active native event NOW, display it.
+1. **P1 私人日历日程 (Private Calendar Events)** — Read user's iCloud private calendar. If there's an active event NOW, display it. These are the user's OWN events (iPhone 日历里的日程).
    - Format: `🚫 产品评审会 (勿扰)` / `📅 团队周会`
-   - These are the user's OWN events (iPhone 日历里的日程)
-2. **P2 飞书/企微同步日程 (Synced External Events)** — If no native event, check for active events tagged with `[企微]` or `[飞书]`. If found, display it.
+2. **P2 共享日历日程 (Shared Calendar Events)** — Read the shared calendar. If there's an active event tagged with `[企微]` or `[飞书]` (synced from external calendars), display it.
    - Format: `📅 [企微] 部门周会` / `📅 [飞书] 需求评审`
-   - These were synced from external calendars by `external_calendar_sync.py`
+   - Note: The pinned status event itself (identified by emoji prefix) is excluded from this check.
 3. **P3 GPS 定位 (Location-based, optional)** — If no event at all and location is enabled, use iCloud Find My to get GPS + AMap reverse geocoding.
    - `🏠 在家` / `🏢 搬砖中` / `📍 在中关村软件园` / `🚗 正在下班途中，距离家 X.Xkm`
 4. **P4 空闲 (Fallback)** — No event AND no location → `✅ 空闲`
 
-**Key distinction between P1 and P2**: CalendarReader's `get_current_event()` now returns events with a `source` field: `"native"` for user's own events, `"synced"` for `[企微]`/`[飞书]` tagged events. The daemon checks P1 first (native), then P2 (synced), before falling through to P3/P4.
+**Key architecture**: External calendar sync (飞书/企微) writes events directly into the **shared calendar**. The daemon reads **both** private calendar and shared calendar to determine status. This means family can see both the synced events AND the pinned status in one calendar.
 
 ### External Calendar Sync Flow (WeCom/Feishu)
 
@@ -482,16 +480,17 @@ The shared calendar ALWAYS has exactly ONE "pinned status" all-day event that re
 企业微信/飞书 CalDAV 服务器
         │ CalDAV 读取
         ▼
-  读取未来 7 天日程
+  读取未来 30 天日程
         │
         ▼
-  清理 iCloud 中旧的 [企微]/[飞书] 事件
+  清理共享日历中旧的 [企微]/[飞书] 事件
         │
         ▼
-  写入 iCloud 私人日历（带 [企微]/[飞书] 前缀标记）
+  写入 iCloud 共享日历（带 [企微]/[飞书] 前缀标记）
         │
         ▼
-  CalendarReader 正常读取 → 被 StatusWall 感知
+  家人直接在共享日历看到飞书/企微日程
+  状态引擎读取共享日历 → 用于 P2 优先级判断
 ```
 
 **WeCom CalDAV 配置方法**: 企业微信 → 日程 → 更多 → 设置 → 同步到系统日历 → 获取用户名和密码，服务器为 `caldav.wecom.work`（代码中需使用 `https://caldav.wecom.work/.well-known/caldav`，根路径会 403）
@@ -565,10 +564,12 @@ Manage layered configuration stored at `~/.status_wall.json` with file permissio
 
 ### 2. External Calendar Sync (`external_calendar_sync.py`) — NEW
 
-Sync WeCom/Feishu events to user's iCloud private calendar via CalDAV.
+Sync WeCom/Feishu events to user's iCloud **shared calendar** (NOT private calendar!) via CalDAV.
 
 **Critical design decisions:**
-- **Tag-based identification**: Synced events get `[企微]` or `[飞书]` prefix in summary. This enables clean-before-write pattern without affecting user's own events.
+- **Writes to SHARED calendar**: Synced events go directly into the shared calendar so family can see them. The old design wrote to private calendar — this is changed.
+- **`_get_shared_calendar()`**: Finds the shared calendar by name match (config `shared_calendar_name`). Replaces old `_get_icloud_calendar()`.
+- **Tag-based identification**: Synced events get `[企微]` or `[飞书]` prefix in summary. This enables clean-before-write pattern.
 - **Clean-then-write**: Before writing new events, delete all existing events with matching tag prefix within the time range. Prevents duplicates.
 - **UUID-based UID**: Each synced event gets `sw-sync-{uuid4}@status-wall` UID.
 - **All-day event handling**: Properly handles both timed events and all-day events (date vs datetime).
@@ -613,16 +614,15 @@ Call AMap reverse geocoding API: `https://restapi.amap.com/v3/geocode/regeo`
 
 ### 6. Calendar Reader (`calendar_reader.py`)
 
-Read private calendar via CalDAV to detect current events, **distinguishing native events from synced events**.
+Read **both** private calendar and shared calendar via CalDAV to detect current events.
 
 **Critical design decisions:**
+- **Reads TWO calendars**: `get_current_events()` reads private calendar AND shared calendar separately, returns `{"private": [...], "shared": [...]}`.
+- **Filters out status events**: Events written by CalendarWriter (identified by emoji prefix like `✅`, `🚫`, `📅` etc.) are excluded when reading the shared calendar, to avoid circular detection.
+- **Source classification**: Private calendar events are `"native"`, shared calendar events with `[企微]`/`[飞书]` prefix are `"synced"`.
 - **All-day event handling**: `_to_naive_datetime()` converts both `date` and `datetime`. Skip all-day events.
 - **Timezone normalization**: Convert to UTC first, then strip tzinfo.
 - **Search range**: `±24h` to catch spanning events.
-- **Source classification (NEW)**: `get_current_events()` returns events with a `source` field:
-  - `"native"` — user's own iCloud events (no `[企微]`/`[飞书]` prefix)
-  - `"synced"` — events synced from external calendars (has `[企微]`/`[飞书]` prefix)
-- **Returns ALL active events**: Instead of returning the first match, returns a list of all currently active events so the daemon can apply the 4-tier priority logic.
 
 ### 7. Calendar Writer (`calendar_writer.py`)
 

@@ -18,9 +18,9 @@ if readme_path.exists():
 
 setup(
     name="status-wall",
-    version="1.1.0",
+    version="2.0.0",
     author="Status Wall Assistant",
-    description="Apple iCloud 状态墙守护进程 - 自动更新用户状态到共享日历",
+    description="Apple iCloud 状态墙 - 聚合多平台日程到共享日历，可选 GPS 定位",
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(),
@@ -31,10 +31,15 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=[
-        "pyicloud>=1.0.0",
         "caldav>=1.3.0",
         "icalendar>=5.0.0",
+        "requests>=2.28.0",
     ],
+    extras_require={
+        "location": [
+            "pyicloud>=1.0.0",
+        ],
+    },
     entry_points={
         "console_scripts": [
             "status_wall=status_wall.cli:main",
@@ -46,9 +51,12 @@ setup(
 ## requirements.txt
 
 ```
-pyicloud>=1.0.0
 caldav>=1.3.0
 icalendar>=5.0.0
+requests>=2.28.0
+
+# 可选：启用 FindMy 定位功能时安装
+# pyicloud>=1.0.0
 ```
 
 ## install.sh
@@ -101,6 +109,18 @@ echo ""
 echo "安装依赖..."
 pip install -r requirements.txt
 
+# 询问是否安装定位功能
+echo ""
+echo "📍 是否启用 FindMy 定位功能？（需要 iCloud 主密码 + 高德 API Key）"
+echo "  定位功能提供：GPS 位置、电子围栏、通勤检测、回家距离等"
+echo "  如果你只需要日程同步，可以跳过"
+read -p "启用定位功能？[y/N] " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    pip install pyicloud>=1.0.0
+    echo "✅ 定位功能已安装"
+fi
+
 # 安装 status_wall
 echo ""
 echo "安装 status_wall..."
@@ -148,13 +168,14 @@ echo "✅ 安装完成!"
 echo ""
 echo "使用步骤:"
 echo "  1. status_wall init       # 初始化配置"
-echo "  2. status_wall start      # 启动守护进程"
-echo "  3. status_wall status     # 查看状态"
+echo "  2. status_wall sync       # 同步企业微信/飞书日程（如已配置）"
+echo "  3. status_wall start      # 启动守护进程"
+echo "  4. status_wall status     # 查看状态"
 echo ""
 echo "其他命令:"
 echo "  status_wall stop          # 停止守护进程"
 echo "  status_wall once          # 单次执行（调试）"
-echo "  status_wall show-gps      # 查看当前位置"
+echo "  status_wall show-gps      # 查看当前位置（需定位功能）"
 echo ""
 echo "配置文件: ~/.status_wall.json"
 echo ""
@@ -165,10 +186,10 @@ echo ""
 ```python
 """
 Apple iCloud 状态墙守护进程
-自动更新用户状态到 iCloud 共享日历
+聚合多平台日程到 iCloud 共享日历，可选 GPS 定位
 """
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"
 __author__ = "Status Wall Assistant"
 ```
 
@@ -189,21 +210,40 @@ class Config:
     """配置管理类 — 懒加载，首次 get/is_configured 时才读磁盘"""
     CONFIG_PATH = Path.home() / ".status_wall.json"
 
-    # 默认配置
+    # 默认配置 — 分层结构
     _DEFAULTS = {
+        # ===== 核心配置（必填）=====
         "icloud_username": "",
-        "icloud_password": "",
-        "icloud_app_password": "",
-        "amap_api_key": "",
+        "icloud_app_password": "",          # Apple 应用专用密码（CalDAV 读写日历）
+        "private_calendar_name": "",        # 读取的私人日历名称
+        "shared_calendar_name": "Status Wall",  # 写入的共享日历名称
+
+        # ===== 可选：企业微信日程同步 =====
+        "wecom_enabled": False,
+        "wecom_caldav_username": "",        # 企业微信日程设置中获取
+        "wecom_caldav_password": "",        # 企业微信日程设置中获取
+        "wecom_calendar_name": "",          # 要同步的企业微信日历名称（留空=全部）
+
+        # ===== 可选：飞书日程同步 =====
+        "feishu_enabled": False,
+        "feishu_caldav_username": "",       # 飞书设置中生成的 CalDAV 用户名
+        "feishu_caldav_password": "",       # 飞书设置中生成的 CalDAV 密码
+        "feishu_caldav_server": "",         # 飞书 CalDAV 服务器地址
+        "feishu_calendar_name": "",         # 要同步的飞书日历名称（留空=全部）
+
+        # ===== 可选：FindMy 定位 + 地图 =====
+        "location_enabled": False,          # 是否启用定位功能
+        "icloud_password": "",              # Apple ID 主密码（仅 FindMy 需要）
+        "amap_api_key": "",                 # 高德地图 API Key（仅定位需要）
         "home_location": {"lat": 0.0, "lon": 0.0, "radius": 200},
         "work_location": {"lat": 0.0, "lon": 0.0, "radius": 200},
-        "private_calendar_name": "",
-        "shared_calendar_name": "Status Wall",
+        "cookie_directory": str(Path.home() / ".status_wall_cookies"),
+
+        # ===== 通用设置 =====
         "polling_interval": 900,
         "commute_polling_interval": 60,
         "log_level": "INFO",
         "data_file": str(Path.home() / ".status_wall_state.json"),
-        "cookie_directory": str(Path.home() / ".status_wall_cookies"),
     }
 
     def __init__(self):
@@ -213,6 +253,10 @@ class Config:
     def data(self):
         if self._data is None:
             self._data = dict(self._DEFAULTS)
+            # 深拷贝嵌套字典
+            for k, v in self._DEFAULTS.items():
+                if isinstance(v, dict):
+                    self._data[k] = dict(v)
             self._load()
         return self._data
 
@@ -230,8 +274,8 @@ class Config:
 
     def reload(self):
         """强制重新加载配置"""
-        self._data = dict(self._DEFAULTS)
-        self._load()
+        self._data = None
+        _ = self.data  # 触发重新加载
 
     def save(self):
         """保存配置"""
@@ -253,63 +297,160 @@ class Config:
         self.data[key] = value
 
     def is_configured(self):
-        """检查必填项是否已配置"""
-        required = ["icloud_username", "icloud_app_password", "amap_api_key"]
+        """检查核心必填项是否已配置"""
+        required = ["icloud_username", "icloud_app_password"]
         return all(self.data.get(k) for k in required)
+
+    def is_location_enabled(self):
+        """是否启用了定位功能"""
+        return (
+            self.data.get("location_enabled", False)
+            and self.data.get("icloud_password")
+            and self.data.get("amap_api_key")
+        )
+
+    def is_wecom_enabled(self):
+        """是否启用了企业微信同步"""
+        return (
+            self.data.get("wecom_enabled", False)
+            and self.data.get("wecom_caldav_username")
+            and self.data.get("wecom_caldav_password")
+        )
+
+    def is_feishu_enabled(self):
+        """是否启用了飞书同步"""
+        return (
+            self.data.get("feishu_enabled", False)
+            and self.data.get("feishu_caldav_username")
+            and self.data.get("feishu_caldav_password")
+        )
 
     def interactive_init(self):
         """交互式初始化配置"""
         print("=" * 50)
         print("🍎 Apple iCloud 状态墙 - 初始化配置")
         print("=" * 50)
-        print()
 
-        print("📧 Apple ID 邮箱:")
+        # ===== 核心配置 =====
+        print("\n【核心配置】iCloud 日历（必填）")
+        print("-" * 40)
+
+        print("\n📧 Apple ID 邮箱:")
         self.data["icloud_username"] = input("> ").strip()
 
-        print("\n🔑 Apple ID 主密码 (用于 Find My 定位):")
-        self.data["icloud_password"] = getpass.getpass("> ")
-
-        print("🔐 应用专用密码 (用于 CalDAV 日历):")
-        print("  在 appleid.apple.com → 登录 → 应用专用密码 生成")
+        print("\n🔐 应用专用密码 (用于 CalDAV 读写日历):")
+        print("  前往 appleid.apple.com → 登录 → 应用专用密码 → 生成")
         self.data["icloud_app_password"] = getpass.getpass("> ")
 
-        print("\n🗺️ 高德地图 Web 服务 API Key:")
-        print("  在 https://lbs.amap.com 申请")
-        self.data["amap_api_key"] = input("> ").strip()
-
-        print("\n🏠 家位置 - 纬度:")
-        self._input_float("home_location", "lat")
-        print("🏠 家位置 - 经度:")
-        self._input_float("home_location", "lon")
-        print("🏠 家位置 - 围栏半径 (默认200米):")
-        self._input_float("home_location", "radius", allow_empty=True)
-
-        print("\n🏢 公司位置 - 纬度:")
-        self._input_float("work_location", "lat")
-        print("🏢 公司位置 - 经度:")
-        self._input_float("work_location", "lon")
-        print("🏢 公司位置 - 围栏半径 (默认200米):")
-        self._input_float("work_location", "radius", allow_empty=True)
-
-        print("\n📅 私人日历名称 (留空使用默认):")
+        print("\n📅 私人日历名称 (读取你的日程，留空使用默认日历):")
         cal = input("> ").strip()
         if cal:
             self.data["private_calendar_name"] = cal
 
-        print("\n📤 共享日历名称 (默认: Status Wall):")
+        print("\n📤 共享日历名称 (写入状态给家人看，默认: Status Wall):")
         shared = input("> ").strip()
         if shared:
             self.data["shared_calendar_name"] = shared
 
-        # 确保 cookie 目录存在
-        cookie_dir = Path(self.data["cookie_directory"])
-        cookie_dir.mkdir(parents=True, exist_ok=True)
+        # ===== 企业微信 =====
+        print("\n" + "=" * 50)
+        print("【可选】企业微信日程同步")
+        print("-" * 40)
+        print("将企业微信的日程同步到你的苹果日历中")
+        print("配置方法: 企业微信 → 日程 → 更多 → 设置 → 同步到系统日历")
+        wecom = input("\n启用企业微信同步？[y/N] ").strip().lower()
+        if wecom in ('y', 'yes'):
+            self.data["wecom_enabled"] = True
+            print("\n👤 企业微信 CalDAV 用户名:")
+            self.data["wecom_caldav_username"] = input("> ").strip()
+            print("🔑 企业微信 CalDAV 密码:")
+            self.data["wecom_caldav_password"] = getpass.getpass("> ")
+            print("📅 要同步的日历名称 (留空=同步全部):")
+            wc = input("> ").strip()
+            if wc:
+                self.data["wecom_calendar_name"] = wc
 
+        # ===== 飞书 =====
+        print("\n" + "=" * 50)
+        print("【可选】飞书日程同步")
+        print("-" * 40)
+        print("将飞书的日程同步到你的苹果日历中")
+        print("配置方法: 飞书 → 设置 → 日历 → 第三方日历管理 → CalDAV 同步")
+        feishu = input("\n启用飞书同步？[y/N] ").strip().lower()
+        if feishu in ('y', 'yes'):
+            self.data["feishu_enabled"] = True
+            print("\n👤 飞书 CalDAV 用户名:")
+            self.data["feishu_caldav_username"] = input("> ").strip()
+            print("🔑 飞书 CalDAV 密码:")
+            self.data["feishu_caldav_password"] = getpass.getpass("> ")
+            print("🌐 飞书 CalDAV 服务器地址 (飞书设置中获取):")
+            self.data["feishu_caldav_server"] = input("> ").strip()
+            print("📅 要同步的日历名称 (留空=同步全部):")
+            fc = input("> ").strip()
+            if fc:
+                self.data["feishu_calendar_name"] = fc
+
+        # ===== FindMy 定位 =====
+        print("\n" + "=" * 50)
+        print("【可选】FindMy 定位 + 地图")
+        print("-" * 40)
+        print("启用后可显示：GPS 位置、电子围栏、通勤检测、回家距离等")
+        print("需要：Apple ID 主密码 + 高德地图 API Key + 家/公司坐标")
+        loc = input("\n启用定位功能？[y/N] ").strip().lower()
+        if loc in ('y', 'yes'):
+            self.data["location_enabled"] = True
+
+            print("\n🔑 Apple ID 主密码 (用于 Find My 定位):")
+            self.data["icloud_password"] = getpass.getpass("> ")
+
+            print("\n🗺️ 高德地图 Web 服务 API Key:")
+            print("  在 https://lbs.amap.com 申请")
+            self.data["amap_api_key"] = input("> ").strip()
+
+            print("\n🏠 家位置 - 纬度:")
+            self._input_float("home_location", "lat")
+            print("🏠 家位置 - 经度:")
+            self._input_float("home_location", "lon")
+            print("🏠 家位置 - 围栏半径 (默认200米):")
+            self._input_float("home_location", "radius", allow_empty=True)
+
+            print("\n🏢 公司位置 - 纬度:")
+            self._input_float("work_location", "lat")
+            print("🏢 公司位置 - 经度:")
+            self._input_float("work_location", "lon")
+            print("🏢 公司位置 - 围栏半径 (默认200米):")
+            self._input_float("work_location", "radius", allow_empty=True)
+
+            # 确保 cookie 目录存在
+            cookie_dir = Path(self.data["cookie_directory"])
+            cookie_dir.mkdir(parents=True, exist_ok=True)
+
+        # ===== 保存 =====
+        print("\n" + "=" * 50)
         if self.save():
-            print(f"\n✅ 配置已保存到 {self.CONFIG_PATH}")
+            print(f"✅ 配置已保存到 {self.CONFIG_PATH}")
+            print()
+            self._print_summary()
         else:
-            print("\n❌ 配置保存失败")
+            print("❌ 配置保存失败")
+
+    def _print_summary(self):
+        """打印配置摘要"""
+        print("📋 配置摘要:")
+        print(f"  iCloud 用户: {self.data['icloud_username']}")
+        print(f"  共享日历: {self.data['shared_calendar_name']}")
+        if self.is_wecom_enabled():
+            print(f"  ✅ 企业微信同步: 已启用")
+        else:
+            print(f"  ⬜ 企业微信同步: 未启用")
+        if self.is_feishu_enabled():
+            print(f"  ✅ 飞书同步: 已启用")
+        else:
+            print(f"  ⬜ 飞书同步: 未启用")
+        if self.is_location_enabled():
+            print(f"  ✅ FindMy 定位: 已启用")
+        else:
+            print(f"  ⬜ FindMy 定位: 未启用（仅显示日程状态）")
 
     def _input_float(self, section, key, allow_empty=False):
         """安全读取浮点数输入"""
@@ -350,6 +491,28 @@ def cmd_init(args):
     config.interactive_init()
 
 
+def cmd_sync(args):
+    """同步外部日历"""
+    if not config.is_configured():
+        print("❌ 配置未完成，请先运行 'status_wall init'")
+        return
+
+    from status_wall.external_calendar_sync import ExternalCalendarSync
+
+    logging.basicConfig(
+        level=logging.DEBUG if getattr(args, 'verbose', False) else logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    )
+
+    sync = ExternalCalendarSync()
+    print("=" * 50)
+    print("📅 外部日历同步")
+    print("=" * 50)
+    total = sync.sync_all()
+    print("=" * 50)
+    print(f"✅ 同步完成，共 {total} 个日程")
+
+
 def cmd_start(args):
     """启动守护进程"""
     if StatusWallDaemon.is_running():
@@ -376,12 +539,21 @@ def cmd_start(args):
             env=env,
             start_new_session=True,
         )
-        # 等待一小段时间确认进程没有立即崩溃
         time.sleep(1)
         if process.poll() is not None:
             print(f"❌ 守护进程启动失败 (退出码: {process.returncode})")
         else:
             print(f"✅ 守护进程已启动 (PID: {process.pid})")
+            # 显示已启用的功能
+            features = []
+            if config.is_wecom_enabled():
+                features.append("企业微信同步")
+            if config.is_feishu_enabled():
+                features.append("飞书同步")
+            if config.is_location_enabled():
+                features.append("FindMy定位")
+            if features:
+                print(f"  已启用: {', '.join(features)}")
             print(f"  使用 'status_wall status' 查看状态")
             print(f"  使用 'status_wall stop' 停止")
 
@@ -395,7 +567,6 @@ def cmd_stop(args):
     pid = StatusWallDaemon.get_pid()
     try:
         os.kill(pid, signal.SIGTERM)
-        # 等待进程退出
         for _ in range(10):
             time.sleep(0.5)
             try:
@@ -403,12 +574,10 @@ def cmd_stop(args):
             except ProcessLookupError:
                 print(f"✅ 守护进程已停止 (PID: {pid})")
                 return
-        # 超时后强制 kill
         os.kill(pid, signal.SIGKILL)
         print(f"⚠️ 守护进程已强制停止 (PID: {pid})")
     except ProcessLookupError:
         print("⚠️ 守护进程已不存在")
-        # 清理残留 PID 文件
         StatusWallDaemon.cleanup_pid()
     except Exception as e:
         print(f"❌ 停止失败: {e}")
@@ -423,8 +592,14 @@ def cmd_status(args):
         print("⚠️ 守护进程未运行")
 
     print(f"\n📁 配置文件: {config.CONFIG_PATH}")
-    print(f"  用户名: {config.get('icloud_username', '未设置')}")
+    print(f"  iCloud 用户: {config.get('icloud_username', '未设置')}")
     print(f"  共享日历: {config.get('shared_calendar_name', 'Status Wall')}")
+
+    # 功能状态
+    print(f"\n📋 功能状态:")
+    print(f"  企业微信同步: {'✅ 已启用' if config.is_wecom_enabled() else '⬜ 未启用'}")
+    print(f"  飞书同步: {'✅ 已启用' if config.is_feishu_enabled() else '⬜ 未启用'}")
+    print(f"  FindMy 定位: {'✅ 已启用' if config.is_location_enabled() else '⬜ 未启用'}")
 
     state_file = Path(config.get("data_file", "")).expanduser()
     if state_file.is_file():
@@ -480,18 +655,19 @@ def main():
     """主入口"""
     parser = argparse.ArgumentParser(
         prog='status_wall',
-        description='🍎 Apple iCloud 状态墙守护进程',
+        description='🍎 Apple iCloud 状态墙 — 聚合多平台日程到共享日历',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
   示例:
     status_wall init                  # 交互式初始化配置
+    status_wall sync                  # 同步企业微信/飞书日程到 iCloud
     status_wall start                 # 启动守护进程（后台）
     status_wall start -f              # 启动守护进程（前台）
     status_wall stop                  # 停止守护进程
     status_wall status                # 查看状态
     status_wall once                  # 单次执行
     status_wall once -v               # 单次执行（详细日志）
-    status_wall show-gps              # 显示当前 GPS 位置
+    status_wall show-gps              # 显示当前 GPS 位置（需启用定位）
   """,
     )
 
@@ -499,6 +675,10 @@ def main():
 
     init_parser = subparsers.add_parser('init', help='交互式初始化配置')
     init_parser.set_defaults(func=cmd_init)
+
+    sync_parser = subparsers.add_parser('sync', help='同步企业微信/飞书日程到 iCloud')
+    sync_parser.add_argument('-v', '--verbose', action='store_true', help='详细日志')
+    sync_parser.set_defaults(func=cmd_sync)
 
     start_parser = subparsers.add_parser('start', help='启动守护进程')
     start_parser.add_argument('-f', '--foreground', action='store_true', help='前台运行')
@@ -514,7 +694,7 @@ def main():
     once_parser.add_argument('-v', '--verbose', action='store_true', help='详细日志输出')
     once_parser.set_defaults(func=cmd_once)
 
-    gps_parser = subparsers.add_parser('show-gps', help='显示当前 GPS 坐标 + 高德地名')
+    gps_parser = subparsers.add_parser('show-gps', help='显示当前 GPS 坐标 + 高德地名（需启用定位）')
     gps_parser.add_argument('-v', '--verbose', action='store_true', help='详细日志输出')
     gps_parser.set_defaults(func=cmd_show_gps)
 
@@ -546,9 +726,7 @@ from datetime import datetime
 from .config import config
 from .calendar_reader import CalendarReader
 from .calendar_writer import CalendarWriter
-from .location_service import LocationService
-from .amap_service import AMapService
-from .state_manager import StateManager
+from .external_calendar_sync import ExternalCalendarSync
 
 logger = logging.getLogger(__name__)
 
@@ -564,14 +742,37 @@ class StatusWallDaemon:
         self.running = False
         self.calendar_reader = CalendarReader()
         self.calendar_writer = CalendarWriter()
-        self.location_service = LocationService()
-        self.amap_service = AMapService()
-        self.state_manager = StateManager()
+        self.external_sync = ExternalCalendarSync()
         self.last_status = None
         self._consecutive_failures = 0
+        self._last_sync_time = 0  # 上次外部日历同步时间
+
+        # 定位相关（可选）
+        self.location_service = None
+        self.amap_service = None
+        self.state_manager = None
+
+        if config.is_location_enabled():
+            self._init_location_services()
 
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _init_location_services(self):
+        """初始化定位相关服务（仅启用定位时调用）"""
+        try:
+            from .location_service import LocationService
+            from .amap_service import AMapService
+            from .state_manager import StateManager
+            self.location_service = LocationService()
+            self.amap_service = AMapService()
+            self.state_manager = StateManager()
+            logger.info("定位服务已初始化")
+        except ImportError as e:
+            logger.warning(f"定位依赖未安装: {e}")
+            logger.warning("请运行 pip install pyicloud 以启用定位功能")
+        except Exception as e:
+            logger.warning(f"定位服务初始化失败: {e}")
 
     def _signal_handler(self, signum, frame):
         """信号处理"""
@@ -583,7 +784,6 @@ class StatusWallDaemon:
         log_level = getattr(logging, config.get("log_level", "INFO").upper(), logging.INFO)
         log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
-        # 清除已有 handlers 避免重复
         root = logging.getLogger()
         root.setLevel(log_level)
         if not root.handlers:
@@ -630,7 +830,6 @@ class StatusWallDaemon:
             os.kill(pid, 0)
             return True
         except (ValueError, ProcessLookupError, FileNotFoundError, PermissionError):
-            # PID 文件存在但进程已死，清理之
             cls.cleanup_pid()
             return False
         except Exception:
@@ -650,13 +849,30 @@ class StatusWallDaemon:
         logger.info("重置所有连接...")
         self.calendar_reader = CalendarReader()
         self.calendar_writer = CalendarWriter()
-        self.location_service = LocationService()
+        if config.is_location_enabled():
+            self._init_location_services()
+
+    def _maybe_sync_external(self):
+        """定期同步外部日历（每 30 分钟）"""
+        now = time.time()
+        sync_interval = 1800  # 30 分钟
+        if now - self._last_sync_time >= sync_interval:
+            if config.is_wecom_enabled() or config.is_feishu_enabled():
+                try:
+                    count = self.external_sync.sync_all()
+                    logger.info(f"外部日历同步完成，共 {count} 个事件")
+                except Exception as e:
+                    logger.warning(f"外部日历同步失败: {e}")
+            self._last_sync_time = now
 
     def run_once(self):
         """单次执行状态更新"""
         try:
             logger.info("-" * 40)
             logger.info("开始状态更新轮询")
+
+            # 0. 定期同步外部日历
+            self._maybe_sync_external()
 
             # 1. 获取当前日程 (P1)
             current_event = None
@@ -667,14 +883,13 @@ class StatusWallDaemon:
 
             location = None
 
-            if not current_event:
-                # 2. 如果没有日程，获取位置 (P2)
+            # 2. 如果没有日程且定位已启用，获取位置 (P2)
+            if not current_event and self.location_service and self.amap_service:
                 loc_data = self.location_service.get_current_location()
                 if loc_data:
                     lat = loc_data.get("lat")
                     lon = loc_data.get("lon")
                     if lat is not None and lon is not None:
-                        # 3. 获取位置名称
                         location_name = self.amap_service.get_location_name(lat, lon)
                         location = {
                             "lat": lat,
@@ -686,20 +901,25 @@ class StatusWallDaemon:
                         logger.warning("GPS 返回了空坐标")
                 else:
                     logger.warning("无法获取位置信息")
-            else:
+            elif current_event:
                 logger.info(f"当前日程: {current_event[0]}")
 
-            # 4. 判断状态
-            status = self.state_manager.determine_state(location, current_event)
+            # 3. 判断状态
+            if self.state_manager:
+                status = self.state_manager.determine_state(location, current_event)
+            else:
+                # 无定位模式：仅基于日程判断状态
+                status = self._determine_calendar_only_state(current_event)
+
             logger.info(f"当前状态: {status['display']}")
 
-            # 5. 如果状态变化，写入日历
+            # 4. 如果状态变化，写入共享日历
             if status['display'] != self.last_status:
                 try:
                     if self.calendar_writer.write_status(status['display']):
                         self.last_status = status['display']
-                        # 持久化 last_status 以便进程重启恢复
-                        self.state_manager.set_last_display(status['display'])
+                        if self.state_manager:
+                            self.state_manager.set_last_display(status['display'])
                         logger.info("状态已同步到日历")
                     else:
                         logger.error("状态同步失败")
@@ -713,11 +933,31 @@ class StatusWallDaemon:
         except Exception as e:
             self._consecutive_failures += 1
             logger.exception(f"执行失败 (连续第{self._consecutive_failures}次): {e}")
-            # 连续失败超过 3 次，重置连接
             if self._consecutive_failures >= 3:
                 self._reset_connections()
                 self._consecutive_failures = 0
             return False, None
+
+    def _determine_calendar_only_state(self, current_event):
+        """无定位模式下的状态判断（仅基于日程）"""
+        if current_event:
+            event_name, is_busy = current_event
+            emoji = "🚫" if is_busy else "📅"
+            suffix = " (勿扰)" if is_busy else ""
+            return {
+                "status": "busy" if is_busy else "event",
+                "emoji": emoji,
+                "display": f"{emoji} {event_name}{suffix}",
+                "location": "",
+                "commute_mode": False,
+            }
+        return {
+            "status": "free",
+            "emoji": "✅",
+            "display": "✅ 空闲",
+            "location": "",
+            "commute_mode": False,
+        }
 
     def run(self):
         """运行守护进程主循环"""
@@ -731,11 +971,21 @@ class StatusWallDaemon:
         self.running = True
 
         # 恢复上次状态
-        self.last_status = self.state_manager.get_last_display()
+        if self.state_manager:
+            self.last_status = self.state_manager.get_last_display()
 
         logger.info("=" * 50)
         logger.info("🍎 状态墙守护进程启动")
-        logger.info(f"  轮询间隔: {config.get('polling_interval')}s / 通勤: {config.get('commute_polling_interval')}s")
+        features = []
+        if config.is_wecom_enabled():
+            features.append("企业微信")
+        if config.is_feishu_enabled():
+            features.append("飞书")
+        if config.is_location_enabled():
+            features.append("FindMy定位")
+        feature_str = " + ".join(features) if features else "仅 iCloud 日程"
+        logger.info(f"  已启用: {feature_str}")
+        logger.info(f"  轮询间隔: {config.get('polling_interval')}s")
         logger.info("=" * 50)
 
         try:
@@ -744,11 +994,12 @@ class StatusWallDaemon:
                 if not self.running:
                     break
 
-                # 计算下次轮询时间
                 if success:
-                    interval = self.state_manager.get_polling_interval()
+                    if self.state_manager:
+                        interval = self.state_manager.get_polling_interval()
+                    else:
+                        interval = config.get("polling_interval", 900)
                 else:
-                    # 失败时使用退避策略
                     interval = min(60 * (2 ** self._consecutive_failures), MAX_BACKOFF)
 
                 if status and status.get("commute_mode"):
@@ -756,7 +1007,6 @@ class StatusWallDaemon:
                 else:
                     logger.info(f"正常模式，{interval}秒后再次检查...")
 
-                # 分段睡眠以响应退出信号
                 slept = 0
                 while slept < interval and self.running:
                     time.sleep(1)
@@ -772,6 +1022,17 @@ class StatusWallDaemon:
     def show_gps(self):
         """显示当前 GPS 和位置"""
         self._setup_logging()
+
+        if not config.is_location_enabled():
+            print("⚠️ 定位功能未启用")
+            print("  请运行 'status_wall init' 并启用 FindMy 定位选项")
+            return
+
+        if not self.location_service:
+            print("❌ 定位服务未初始化")
+            print("  请检查 pyicloud 是否已安装: pip install pyicloud")
+            return
+
         print("=" * 50)
         print("🗺️ GPS 位置信息")
         print("=" * 50)
@@ -793,30 +1054,32 @@ class StatusWallDaemon:
             if accuracy:
                 print(f"  精度: ±{accuracy:.0f}m")
 
-            location_info = self.amap_service.reverse_geocode(lat, lon)
-            if location_info:
-                print(f"\n🏠 位置信息:")
-                print(f"  地址: {location_info.get('formatted_address', 'N/A')}")
-                print(f"  AOI: {location_info.get('aoi') or 'N/A'}")
-                print(f"  POI: {location_info.get('poi') or 'N/A'}")
-                print(f"  街道: {location_info.get('street') or 'N/A'}")
-            else:
-                print("\n❌ 无法获取位置名称")
+            if self.amap_service:
+                location_info = self.amap_service.reverse_geocode(lat, lon)
+                if location_info:
+                    print(f"\n🏠 位置信息:")
+                    print(f"  地址: {location_info.get('formatted_address', 'N/A')}")
+                    print(f"  AOI: {location_info.get('aoi') or 'N/A'}")
+                    print(f"  POI: {location_info.get('poi') or 'N/A'}")
+                    print(f"  街道: {location_info.get('street') or 'N/A'}")
+                else:
+                    print("\n❌ 无法获取位置名称")
 
-            home_config = config.get("home_location", {})
-            work_config = config.get("work_location", {})
-            print(f"\n📏 围栏距离:")
+            if self.state_manager:
+                home_config = config.get("home_location", {})
+                work_config = config.get("work_location", {})
+                print(f"\n📏 围栏距离:")
 
-            sm = self.state_manager
-            if home_config.get("lat") and home_config.get("lon"):
-                at_home, home_dist = sm._is_in_geofence(lat, lon, home_config)
-                label = "✅ 围栏内" if at_home else f"{home_dist:.0f}m"
-                print(f"  家: {label} (围栏半径: {home_config.get('radius', 200)}m)")
+                sm = self.state_manager
+                if home_config.get("lat") and home_config.get("lon"):
+                    at_home, home_dist = sm._is_in_geofence(lat, lon, home_config)
+                    label = "✅ 围栏内" if at_home else f"{home_dist:.0f}m"
+                    print(f"  家: {label} (围栏半径: {home_config.get('radius', 200)}m)")
 
-            if work_config.get("lat") and work_config.get("lon"):
-                at_work, work_dist = sm._is_in_geofence(lat, lon, work_config)
-                label = "✅ 围栏内" if at_work else f"{work_dist:.0f}m"
-                print(f"  公司: {label} (围栏半径: {work_config.get('radius', 200)}m)")
+                if work_config.get("lat") and work_config.get("lon"):
+                    at_work, work_dist = sm._is_in_geofence(lat, lon, work_config)
+                    label = "✅ 围栏内" if at_work else f"{work_dist:.0f}m"
+                    print(f"  公司: {label} (围栏半径: {work_config.get('radius', 200)}m)")
         else:
             print("\n❌ 无法获取 GPS 位置")
             print("  请检查 iCloud 认证信息和网络连接")
@@ -1538,6 +1801,336 @@ class CalendarWriter:
             # 标记连接失效
             self.target_calendar = None
             return False
+```
+
+## status_wall/external_calendar_sync.py
+
+```python
+"""
+外部日历同步模块
+将企业微信/飞书的日程通过 CalDAV 读取后，复制到用户的 iCloud 私人日历中。
+家人通过共享日历即可看到聚合后的日程状态。
+"""
+
+import logging
+import uuid
+from datetime import datetime, timedelta, date, timezone
+from caldav import DAVClient
+from icalendar import Calendar as iCalendar, Event
+from .config import config
+
+logger = logging.getLogger(__name__)
+
+# 同步事件的标记前缀，用于识别和清理
+SYNC_TAG_WECOM = "[企微]"
+SYNC_TAG_FEISHU = "[飞书]"
+
+
+class ExternalCalendarSync:
+    """
+    外部日历同步器
+
+    工作流程:
+    1. 通过 CalDAV 连接到企业微信/飞书日历服务器
+    2. 读取指定时间范围内的日程
+    3. 将这些日程作为事件写入用户的 iCloud 私人日历
+    4. 事件标题加前缀标记来源（[企微] / [飞书]），方便识别和清理
+    """
+
+    def __init__(self):
+        self.icloud_client = None
+        self.icloud_principal = None
+
+    def _connect_icloud(self):
+        """连接到 iCloud CalDAV（用于写入同步事件）"""
+        try:
+            username = config.get("icloud_username")
+            password = config.get("icloud_app_password")
+            if not username or not password:
+                logger.error("缺少 iCloud 认证信息")
+                return False
+
+            self.icloud_client = DAVClient(
+                url="https://caldav.icloud.com",
+                username=username,
+                password=password,
+            )
+            self.icloud_principal = self.icloud_client.principal()
+            return True
+        except Exception as e:
+            logger.error(f"iCloud CalDAV 连接失败: {e}")
+            self.icloud_client = None
+            self.icloud_principal = None
+            return False
+
+    def _get_icloud_calendar(self, calendar_name=""):
+        """获取 iCloud 目标日历"""
+        if not self.icloud_principal:
+            if not self._connect_icloud():
+                return None
+
+        calendars = self.icloud_principal.calendars()
+        if not calendars:
+            logger.error("iCloud 中没有日历")
+            return None
+
+        target_name = calendar_name or config.get("private_calendar_name", "")
+        shared_name = config.get("shared_calendar_name", "Status Wall").lower()
+
+        # 精确匹配
+        if target_name:
+            for cal in calendars:
+                if cal.name and target_name.lower() in cal.name.lower():
+                    return cal
+
+        # 排除共享日历后取第一个
+        for cal in calendars:
+            cal_name = (cal.name or "").lower()
+            if shared_name not in cal_name:
+                return cal
+
+        return calendars[0] if calendars else None
+
+    def _connect_external_caldav(self, server_url, username, password):
+        """连接到外部 CalDAV 服务器"""
+        try:
+            client = DAVClient(
+                url=server_url,
+                username=username,
+                password=password,
+            )
+            principal = client.principal()
+            return principal
+        except Exception as e:
+            logger.error(f"外部 CalDAV 连接失败 ({server_url}): {e}")
+            return None
+
+    def _read_events_from_external(self, principal, calendar_name="", days_ahead=7):
+        """从外部日历读取未来 N 天的事件"""
+        events_list = []
+        try:
+            calendars = principal.calendars()
+            if not calendars:
+                logger.warning("外部日历账户中没有日历")
+                return events_list
+
+            target_calendars = []
+            if calendar_name:
+                for cal in calendars:
+                    if cal.name and calendar_name.lower() in cal.name.lower():
+                        target_calendars.append(cal)
+                        break
+            if not target_calendars:
+                target_calendars = calendars
+
+            now = datetime.now()
+            start = now - timedelta(hours=1)
+            end = now + timedelta(days=days_ahead)
+
+            for cal in target_calendars:
+                try:
+                    logger.info(f"读取日历: {cal.name}")
+                    events = cal.date_search(start=start, end=end)
+                    for event in events:
+                        try:
+                            ical_data = event.data
+                            ical = iCalendar.from_ical(ical_data)
+                            for component in ical.walk():
+                                if component.name != "VEVENT":
+                                    continue
+                                summary = str(component.get("summary", "")).strip()
+                                dt_start = component.get("dtstart")
+                                dt_end = component.get("dtend")
+                                if not summary or not dt_start:
+                                    continue
+
+                                events_list.append({
+                                    "summary": summary,
+                                    "dtstart": dt_start.dt,
+                                    "dtend": dt_end.dt if dt_end else None,
+                                    "description": str(component.get("description", "")),
+                                    "location": str(component.get("location", "")),
+                                    "transp": str(component.get("transp", "OPAQUE")).upper(),
+                                    "uid": str(component.get("uid", "")),
+                                })
+                        except Exception as e:
+                            logger.debug(f"解析外部事件失败: {e}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"读取日历 {cal.name} 失败: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"读取外部日程失败: {e}")
+
+        return events_list
+
+    def _clean_synced_events(self, icloud_cal, tag):
+        """清理 iCloud 日历中已同步的外部事件（按标记前缀）"""
+        try:
+            now = datetime.now()
+            start = now - timedelta(hours=1)
+            end = now + timedelta(days=8)
+            events = icloud_cal.date_search(start=start, end=end)
+
+            deleted = 0
+            for event in events:
+                try:
+                    ical = iCalendar.from_ical(event.data)
+                    for component in ical.walk():
+                        if component.name == "VEVENT":
+                            summary = str(component.get("summary", ""))
+                            if summary.startswith(tag):
+                                event.delete()
+                                deleted += 1
+                                break
+                except Exception:
+                    continue
+
+            if deleted:
+                logger.info(f"清理了 {deleted} 个 {tag} 旧同步事件")
+        except Exception as e:
+            logger.warning(f"清理同步事件失败: {e}")
+
+    def _write_events_to_icloud(self, icloud_cal, events, tag):
+        """将事件写入 iCloud 日历"""
+        written = 0
+        for evt in events:
+            try:
+                cal = iCalendar()
+                cal.add('prodid', '-//Status Wall//External Sync 2.0//EN')
+                cal.add('version', '2.0')
+
+                event = Event()
+                event.add('summary', f"{tag} {evt['summary']}")
+
+                dt_start = evt['dtstart']
+                dt_end = evt.get('dtend')
+
+                # 处理全天事件
+                if isinstance(dt_start, date) and not isinstance(dt_start, datetime):
+                    event.add('dtstart', dt_start)
+                    event.add('dtend', dt_end if dt_end else dt_start + timedelta(days=1))
+                else:
+                    event.add('dtstart', dt_start)
+                    if dt_end:
+                        event.add('dtend', dt_end)
+                    else:
+                        event.add('dtend', dt_start + timedelta(hours=1))
+
+                event.add('dtstamp', datetime.utcnow())
+                event.add('uid', f"sw-sync-{uuid.uuid4()}@status-wall")
+
+                if evt.get('description'):
+                    event.add('description', evt['description'])
+                if evt.get('location'):
+                    event.add('location', evt['location'])
+
+                event.add('transp', evt.get('transp', 'OPAQUE'))
+
+                cal.add_component(event)
+                icloud_cal.add_event(cal.to_ical())
+                written += 1
+
+            except Exception as e:
+                logger.warning(f"写入同步事件失败 ({evt.get('summary', '?')}): {e}")
+                continue
+
+        return written
+
+    def sync_wecom(self):
+        """同步企业微信日程到 iCloud"""
+        if not config.is_wecom_enabled():
+            logger.debug("企业微信同步未启用")
+            return 0
+
+        print("🔄 同步企业微信日程...")
+        username = config.get("wecom_caldav_username")
+        password = config.get("wecom_caldav_password")
+        calendar_name = config.get("wecom_calendar_name", "")
+
+        principal = self._connect_external_caldav(
+            "https://caldav.wecom.work",
+            username,
+            password,
+        )
+        if not principal:
+            print("❌ 企业微信 CalDAV 连接失败")
+            return 0
+
+        events = self._read_events_from_external(principal, calendar_name)
+        if not events:
+            print("  📭 企业微信无待同步日程")
+            return 0
+
+        icloud_cal = self._get_icloud_calendar()
+        if not icloud_cal:
+            print("❌ 无法获取 iCloud 日历")
+            return 0
+
+        # 先清理旧的同步事件，再写入新的
+        self._clean_synced_events(icloud_cal, SYNC_TAG_WECOM)
+        written = self._write_events_to_icloud(icloud_cal, events, SYNC_TAG_WECOM)
+
+        print(f"  ✅ 同步了 {written} 个企业微信日程")
+        return written
+
+    def sync_feishu(self):
+        """同步飞书日程到 iCloud"""
+        if not config.is_feishu_enabled():
+            logger.debug("飞书同步未启用")
+            return 0
+
+        print("🔄 同步飞书日程...")
+        username = config.get("feishu_caldav_username")
+        password = config.get("feishu_caldav_password")
+        server = config.get("feishu_caldav_server", "")
+        calendar_name = config.get("feishu_calendar_name", "")
+
+        if not server:
+            print("❌ 飞书 CalDAV 服务器地址未配置")
+            return 0
+
+        # 确保 URL 格式
+        if not server.startswith("http"):
+            server = f"https://{server}"
+
+        principal = self._connect_external_caldav(server, username, password)
+        if not principal:
+            print("❌ 飞书 CalDAV 连接失败")
+            return 0
+
+        events = self._read_events_from_external(principal, calendar_name)
+        if not events:
+            print("  📭 飞书无待同步日程")
+            return 0
+
+        icloud_cal = self._get_icloud_calendar()
+        if not icloud_cal:
+            print("❌ 无法获取 iCloud 日历")
+            return 0
+
+        self._clean_synced_events(icloud_cal, SYNC_TAG_FEISHU)
+        written = self._write_events_to_icloud(icloud_cal, events, SYNC_TAG_FEISHU)
+
+        print(f"  ✅ 同步了 {written} 个飞书日程")
+        return written
+
+    def sync_all(self):
+        """同步所有已启用的外部日历"""
+        total = 0
+
+        if config.is_wecom_enabled():
+            total += self.sync_wecom()
+
+        if config.is_feishu_enabled():
+            total += self.sync_feishu()
+
+        if total == 0 and not config.is_wecom_enabled() and not config.is_feishu_enabled():
+            print("⚠️ 未启用任何外部日历同步")
+            print("  请运行 'status_wall init' 配置企业微信或飞书")
+
+        return total
 ```
 
 ## status_wall/state_manager.py

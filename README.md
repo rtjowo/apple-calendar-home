@@ -1,130 +1,136 @@
-# 🍎 Apple iCloud 状态墙 — CodeBuddy Skill
+# 🍎 Apple iCloud 状态墙 (Status Wall) v2.0
 
-一个 [CodeBuddy](https://codebuddy.ai) Skill，让 AI 帮你一键搭建 **iCloud 日历状态墙** — 自动将你的实时状态同步到 iCloud 共享日历，家人朋友订阅即可随时查看。
+> 聚合多平台日程，让家人随时知道你在忙什么
+
+将你的 **iCloud 日历** + **企业微信日程** + **飞书日程** 聚合到一个共享日历中，家人订阅后即可看到你的实时状态。
 
 ## 效果展示
 
-| 场景 | 日历显示 |
-|------|---------|
-| 正在开会 | 🚫 产品评审会 (勿扰) |
-| 在家 | 🏠 在家 |
-| 在公司 | 🏢 搬砖中 |
-| 上班路上 | 🚗 正在上班途中（当前：望京西站） |
-| 下班路上 | 🚗 正在下班途中，距离家 3.2km（当前：中关村软件园） |
-| 在外面 | 📍 在朝阳大悦城 |
+| 场景 | 共享日历显示 |
+|------|-------------|
+| 正在开会（忙碌） | 🚫 产品评审会 (勿扰) |
+| 正在开会（空闲） | 📅 周会 |
+| 企业微信日程 | 📅 [企微] 部门例会 |
+| 飞书日程 | 📅 [飞书] 需求评审 |
+| 空闲无日程 | ✅ 空闲 |
+| 在家（需定位） | 🏠 在家 |
+| 在公司（需定位） | 🏢 搬砖中 |
+| 下班途中（需定位） | 🚗 正在下班途中，距离家 3.2km |
 
 ## 工作原理
 
 ```
-┌─────────────────────────────────────────────────┐
-│                 Status Wall 守护进程              │
-│                                                   │
-│  ① 读取私人日历 ──→ 有日程？──→ 显示日程名称      │
-│                        │ 无                       │
-│  ② iCloud Find My ──→ GPS 坐标                   │
-│        │                                          │
-│  ③ 高德逆地理编码 ──→ 位置名称                    │
-│        │                                          │
-│  ④ 地理围栏判断 ──→ 在家/公司/通勤/在外           │
-│        │                                          │
-│  ⑤ 写入共享日历 ──→ 家人朋友可见                  │
-└─────────────────────────────────────────────────┘
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│  iCloud 日历  │  │  企业微信日程  │  │  飞书日程    │
+│  (CalDAV)    │  │  (CalDAV)    │  │  (CalDAV)    │
+└──────┬───────┘  └──────┬───────┘  └──────┬───────┘
+       │                 │                 │
+       │         ┌───────▼─────────────────▼──┐
+       │         │    同步到 iCloud 私人日历     │
+       │         │    (带 [企微]/[飞书] 标记)    │
+       │         └───────┬────────────────────┘
+       │                 │
+       ▼                 ▼
+┌──────────────────────────────┐     ┌─────────────────┐
+│    读取当前日程（P1 优先）     │     │  GPS 定位 (可选)  │
+│    正在进行的日程 → 显示状态   │     │  FindMy + 高德    │
+└──────────┬───────────────────┘     └────────┬────────┘
+           │                                  │
+           ▼                                  ▼
+┌─────────────────────────────────────────────────────┐
+│              写入 iCloud 共享日历                      │
+│              家人订阅后可见                            │
+└─────────────────────────────────────────────────────┘
 ```
 
-**智能轮询**：通勤时 1 分钟刷新一次，平时 15 分钟一次。
+## 功能分层
 
-## 如何使用
+| 层级 | 功能 | 需要什么 |
+|------|------|----------|
+| **核心** | iCloud 日程读取 + 状态写入 | Apple ID + 应用专用密码 |
+| **可选 A** | 企业微信日程同步 | 企业微信 CalDAV 账号密码 |
+| **可选 A** | 飞书日程同步 | 飞书 CalDAV 账号密码 |
+| **可选 B** | GPS 位置 + 电子围栏 + 通勤检测 | Apple ID 主密码 + 高德 API Key + 家/公司坐标 |
 
-### 前置准备
+## 快速开始
 
-| 准备项 | 获取方式 |
-|--------|---------|
-| Apple ID 邮箱 + 密码 | — |
-| 应用专用密码 | [appleid.apple.com](https://appleid.apple.com) → 登录 → 应用专用密码 → 生成 |
-| 高德地图 API Key | [lbs.amap.com](https://lbs.amap.com) → 控制台 → 创建应用 → Web 服务 Key |
-| 家 & 公司经纬度 | [高德坐标拾取器](https://lbs.amap.com/tools/picker) |
+### 1. 准备工作
 
-### 方式一：在 CodeBuddy 中使用 Skill
+**必须准备：**
+- Apple ID 邮箱
+- Apple ID **应用专用密码**（前往 [appleid.apple.com](https://appleid.apple.com) → 登录 → 应用专用密码 → 生成）
+- 在 iCloud 日历中创建一个**共享日历**（如 "Status Wall"），并邀请家人
 
-1. 将本仓库作为 Skill 导入 CodeBuddy
-2. 对 AI 说：**"帮我搭建一个 iCloud 日历状态墙项目"**
-3. AI 会自动生成完整项目代码并指导你配置运行
+**如果要同步企业微信日程：**
+- 企业微信 → 日程 → 右上角更多 → 设置 → 同步到系统日历 → 获取**用户名**和**密码**
+- 服务器地址：`caldav.wecom.work`
 
-### 方式二：直接使用源代码
+**如果要同步飞书日程：**
+- 飞书 → 设置 → 日历 → 第三方日历管理 → CalDAV 同步 → 获取**用户名**、**密码**和**服务器地址**
 
-项目源代码在 `references/source_code.md` 中，包含完整的 10 个 Python 模块。
+**如果要启用 GPS 定位（在家/公司/通勤等状态）：**
+- Apple ID 主密码（用于 Find My）
+- [高德地图 Web 服务 API Key](https://lbs.amap.com)
+- 家和公司的经纬度坐标
+
+### 2. 安装
 
 ```bash
-# 快速脚手架
-bash scripts/scaffold_project.sh my-status-wall
-
-# 安装
-cd my-status-wall
+git clone https://github.com/rtjowo/apple-calendar-home.git
+cd apple-calendar-home
 bash install.sh
+```
 
-# 初始化配置
+### 3. 配置
+
+```bash
 status_wall init
+```
 
-# 启动
+交互式配置会引导你设置：
+1. **iCloud 核心配置**（必填）
+2. **企业微信同步**（可选，输入 y 开启）
+3. **飞书同步**（可选，输入 y 开启）
+4. **FindMy 定位**（可选，输入 y 开启）
+
+### 4. 运行
+
+```bash
+# 手动同步一次企业微信/飞书日程
+status_wall sync
+
+# 启动守护进程（后台自动运行）
 status_wall start
 
-# 查看状态
+# 查看当前状态
 status_wall status
 ```
 
-### 可用命令
+## 可用命令
 
-```
-status_wall init          # 交互式配置（填写 Apple ID、API Key、坐标等）
-status_wall start         # 后台启动守护进程
-status_wall start -f      # 前台启动（调试用）
-status_wall stop          # 停止
-status_wall status        # 查看运行状态
-status_wall once -v       # 单次执行（详细日志）
-status_wall show-gps      # 查看当前 GPS + 高德地名 + 围栏距离
-```
+| 命令 | 说明 |
+|------|------|
+| `status_wall init` | 交互式初始化配置 |
+| `status_wall sync` | 手动同步企业微信/飞书日程 |
+| `status_wall start` | 启动守护进程（后台） |
+| `status_wall start -f` | 启动守护进程（前台） |
+| `status_wall stop` | 停止守护进程 |
+| `status_wall status` | 查看运行状态 |
+| `status_wall once` | 单次执行（调试） |
+| `status_wall once -v` | 单次执行（详细日志） |
+| `status_wall show-gps` | 显示 GPS 位置（需启用定位） |
 
 ## 技术栈
 
-- **Python 3.8+**
-- **pyicloud** — iCloud Find My 定位
-- **caldav** — CalDAV 日历读写
-- **icalendar** — iCalendar 数据解析
-- **高德地图 API** — 逆地理编码
-
-## 项目结构
-
-```
-status_wall/
-├── config.py           # 配置管理（懒加载，~/.status_wall.json）
-├── cli.py              # 命令行入口
-├── daemon.py           # 守护进程（自动重连 + 失败退避）
-├── daemon_runner.py    # 后台进程启动器
-├── location_service.py # iCloud GPS（会话持久化 + 2FA/2SA）
-├── amap_service.py     # 高德逆地理编码（带缓存）
-├── calendar_reader.py  # 私人日历读取（全天事件 + 时区处理）
-├── calendar_writer.py  # 共享日历写入（UUID 去重）
-└── state_manager.py    # 状态机（地理围栏 + 通勤检测）
-```
-
-## Skill 文件结构
-
-```
-apple-calendar-home/
-├── SKILL.md                      # Skill 指令（架构设计 + 模块实现指南）
-├── references/
-│   └── source_code.md            # 完整源代码（10 个模块）
-└── scripts/
-    └── scaffold_project.sh       # 项目脚手架脚本
-```
+- Python 3.8+
+- `caldav` — CalDAV 日历读写（iCloud / 企业微信 / 飞书）
+- `icalendar` — iCalendar 数据解析
+- `requests` — HTTP 请求
+- `pyicloud` — (可选) iCloud Find My GPS 定位
 
 ## 注意事项
 
-- 首次运行需处理 Apple 双重认证，之后会话会持久化（cookie）
-- 配置文件权限自动设为 `0600`（仅所有者可读写）
-- 建议在 macOS 或 Linux 上运行
-- 后台运行日志输出到 `~/.status_wall.log`
-
-## License
-
-MIT
+- 首次使用 Find My 定位时需要处理 Apple 2FA 双重认证
+- 配置文件 `~/.status_wall.json` 设置了 `0600` 权限，仅本人可读写
+- 守护进程启动后，外部日历每 30 分钟自动同步一次
+- 推荐在 macOS 或 Linux 服务器上运行

@@ -487,7 +487,7 @@ Sync WeCom/Feishu events to user's iCloud private calendar via CalDAV.
 - **WeCom CalDAV server**: `https://caldav.wecom.work/.well-known/caldav` (root `/` returns 403, must use well-known endpoint)
 - **Feishu CalDAV server**: User-provided (varies by organization). Code MUST auto-prepend `https://` if missing.
 - **⚠️ Both Feishu and WeCom use RAW HTTP, not caldav library**: Neither server fully supports standard CalDAV protocol. Each has a dedicated `_read_xxx_events_raw()` method using pure `requests`.
-- **⚠️ Feishu flow**: PROPFIND → calendar-query → **calendar-multiget** (Feishu blocks GET but supports multiget)
+- **⚠️ Feishu flow**: PROPFIND → calendar-query → **calendar-multiget** (Feishu blocks GET but supports multiget). **Timeout must be 60s** (not 30s) with 2 retries — Feishu CalDAV is very slow from overseas/cloud servers.
 - **⚠️ WeCom flow**: PROPFIND /calendar/ → calendar-query → **GET each .ics** (WeCom blocks multiget but supports GET)
 - **⚠️ WeCom root URL**: Must use `/.well-known/caldav` or `/calendar/` — root `/` returns 403
 - **⚠️ Time range**: Use ±30 days. **⚠️ DAVClient timeout**: Always set `timeout=30`.

@@ -2017,10 +2017,28 @@ class ExternalCalendarSync:
         因此必须用两步走:
         1. PROPFIND 获取日历 URL + calendar-query 获取事件 href 列表
         2. calendar-multiget 批量获取事件数据
+        
+        注意: 飞书 CalDAV 服务器可能很慢，timeout 设为 60s，并带重试
         """
         events_list = []
         auth = HTTPBasicAuth(username, password)
         ns = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:caldav"}
+        TIMEOUT = 60  # 飞书 CalDAV 较慢，需要更长超时
+        MAX_RETRIES = 2
+
+        def _request_with_retry(method, url, **kwargs):
+            """带重试的 HTTP 请求"""
+            kwargs.setdefault("timeout", TIMEOUT)
+            kwargs.setdefault("auth", auth)
+            kwargs.setdefault("headers", {"Content-Type": "application/xml", "Depth": "1"})
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    return http_requests.request(method, url, **kwargs)
+                except Exception as e:
+                    if attempt < MAX_RETRIES:
+                        logger.warning(f"飞书请求超时，重试 ({attempt+1}/{MAX_RETRIES}): {e}")
+                        continue
+                    raise
 
         try:
             # Step 1: PROPFIND 获取用户的日历集合
@@ -2029,11 +2047,7 @@ class ExternalCalendarSync:
 <D:propfind xmlns:D="DAV:">
   <D:prop><D:resourcetype/></D:prop>
 </D:propfind>'''
-            resp = http_requests.request(
-                "PROPFIND", principal_url, auth=auth, data=propfind_xml,
-                headers={"Content-Type": "application/xml", "Depth": "1"},
-                timeout=30,
-            )
+            resp = _request_with_retry("PROPFIND", principal_url, data=propfind_xml)
             if resp.status_code != 207:
                 logger.error(f"飞书 PROPFIND 失败: {resp.status_code}")
                 return events_list
@@ -2070,11 +2084,7 @@ class ExternalCalendarSync:
   </C:filter>
 </C:calendar-query>'''
 
-                resp = http_requests.request(
-                    "REPORT", cal_url, auth=auth, data=query_xml,
-                    headers={"Content-Type": "application/xml", "Depth": "1"},
-                    timeout=30,
-                )
+                resp = _request_with_retry("REPORT", cal_url, data=query_xml)
                 if resp.status_code != 207:
                     logger.warning(f"飞书 calendar-query 失败: {resp.status_code}")
                     continue
@@ -2103,11 +2113,7 @@ class ExternalCalendarSync:
 {href_elements}
 </C:calendar-multiget>'''
 
-                resp = http_requests.request(
-                    "REPORT", cal_url, auth=auth, data=multiget_xml,
-                    headers={"Content-Type": "application/xml", "Depth": "1"},
-                    timeout=30,
-                )
+                resp = _request_with_retry("REPORT", cal_url, data=multiget_xml)
                 if resp.status_code != 207:
                     logger.warning(f"飞书 calendar-multiget 失败: {resp.status_code}")
                     continue

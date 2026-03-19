@@ -176,8 +176,8 @@ After generating the project and writing the config:
 
 1. **Immediately run a connection test** — do NOT ask the user "要我帮你测试吗？", just do it. Write and execute a small Python script that:
    - Connects to iCloud CalDAV and lists calendars
-   - If Feishu is enabled: connects to Feishu CalDAV, reads events, syncs to iCloud
-   - If WeCom is enabled: connects to WeCom CalDAV, reads events, syncs to iCloud
+   - If Feishu is enabled: use RAW HTTP requests (`requests` library) with `calendar-multiget` to read events, then sync to iCloud. **Do NOT use the `caldav` library for Feishu — it will fail silently (GET 403).**
+   - If WeCom is enabled: use RAW HTTP requests (`requests` library) with individual `GET` to read events, then sync to iCloud. **Do NOT use the `caldav` library for WeCom — root URL returns 403.**
    - Reports results
 
 2. **If "Status Wall" calendar doesn't exist**, tell the user to create it, but **don't treat it as a blocking error** — use any available calendar temporarily and mention the user needs to create the shared one.
@@ -185,6 +185,15 @@ After generating the project and writing the config:
 3. **Auto-run sync on first deployment.** After the project is generated, if Feishu/WeCom is enabled, run `status_wall sync` or equivalent Python code automatically. Don't just say "you can run sync later".
 
 4. **Auto-start the daemon.** After successful testing, start the daemon automatically. Don't ask "要我帮你启动守护进程吗？"
+
+### ⚠️⚠️⚠️ CRITICAL: Do NOT use `caldav` library for Feishu or WeCom ⚠️⚠️⚠️
+
+**Neither Feishu nor WeCom supports the standard CalDAV protocol properly.** The `caldav` Python library **WILL fail silently** — it will connect successfully but return 0 events.
+
+- **Feishu**: GET .ics → 403, calendar-query calendar-data → 404. Only `calendar-multiget` works.
+- **WeCom**: Root `/` → 403, calendar-multiget → 403. Only individual `GET .ics` works.
+
+**You MUST use the raw HTTP implementations** (`_read_feishu_events_raw()` and `_read_wecom_events_raw()`) from `source_code.md`. These use the `requests` library directly with XML REPORT requests. The `caldav` library is ONLY used for iCloud CalDAV (which works fine with standard protocol).
 
 ### AI behavior rules for CalDAV code generation (CRITICAL)
 

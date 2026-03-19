@@ -327,98 +327,129 @@ class Config:
 
     def interactive_init(self):
         """交互式初始化配置"""
-        print("=" * 50)
-        print("🍎 Apple iCloud 状态墙 - 初始化配置")
-        print("=" * 50)
+        print()
+        print("=" * 55)
+        print("  🍎 Apple iCloud 状态墙 — 初始化配置")
+        print("=" * 55)
 
         # ===== 核心配置 =====
-        print("\n【核心配置】iCloud 日历（必填）")
-        print("-" * 40)
+        print()
+        print("━━━━ 第一步：iCloud 日历（必填）━━━━")
+        print()
+        print("📧 Apple ID 邮箱（登录 iCloud 用的那个）:")
+        self.data["icloud_username"] = input("  > ").strip()
 
-        print("\n📧 Apple ID 邮箱:")
-        self.data["icloud_username"] = input("> ").strip()
+        print()
+        print("🔐 应用专用密码:")
+        print("   ⚠️ 不是你的 Apple 登录密码！")
+        print("   获取方法: appleid.apple.com → 登录 → App 专用密码 → 生成")
+        print("   格式类似: xxxx-xxxx-xxxx-xxxx")
+        self.data["icloud_app_password"] = getpass.getpass("  > ")
 
-        print("\n🔐 应用专用密码 (用于 CalDAV 读写日历):")
-        print("  前往 appleid.apple.com → 登录 → 应用专用密码 → 生成")
-        self.data["icloud_app_password"] = getpass.getpass("> ")
-
-        print("\n📅 私人日历名称 (读取你的日程，留空使用默认日历):")
-        cal = input("> ").strip()
+        print()
+        print("📅 你想读取哪个日历的日程？")
+        print("   留空 = 使用默认日历（大多数人直接回车就行）")
+        cal = input("  > ").strip()
         if cal:
             self.data["private_calendar_name"] = cal
 
-        print("\n📤 共享日历名称 (写入状态给家人看，默认: Status Wall):")
-        shared = input("> ").strip()
+        print()
+        print("📤 状态写入到哪个共享日历？")
+        print("   这个日历需要提前创建好并分享给家人")
+        print("   留空 = 使用 \"Status Wall\"")
+        shared = input("  > ").strip()
         if shared:
             self.data["shared_calendar_name"] = shared
 
         # ===== 企业微信 =====
-        print("\n" + "=" * 50)
-        print("【可选】企业微信日程同步")
-        print("-" * 40)
-        print("将企业微信的日程同步到你的苹果日历中")
-        print("配置方法: 企业微信 → 日程 → 更多 → 设置 → 同步到系统日历")
-        wecom = input("\n启用企业微信同步？[y/N] ").strip().lower()
+        print()
+        print("━━━━ 第二步：工作日程同步（可选）━━━━")
+        print()
+        print("  可以把企业微信/飞书的日程同步到苹果日历，")
+        print("  这样家人也能看到你的工作安排。")
+        print("  同步是单向的：只读取，不会反向写入。")
+
+        print()
+        print("📱 你用企业微信吗？")
+        print("   如果用，需要获取 CalDAV 同步信息:")
+        print("   企业微信 App → 工作台 → 日程 → ⋯ → 设置 → 同步到系统日历")
+        wecom = input("  启用企业微信同步？[y/N] ").strip().lower()
         if wecom in ('y', 'yes'):
             self.data["wecom_enabled"] = True
-            print("\n👤 企业微信 CalDAV 用户名:")
-            self.data["wecom_caldav_username"] = input("> ").strip()
-            print("🔑 企业微信 CalDAV 密码:")
-            self.data["wecom_caldav_password"] = getpass.getpass("> ")
-            print("📅 要同步的日历名称 (留空=同步全部):")
-            wc = input("> ").strip()
+            print()
+            print("  👤 企业微信 CalDAV 用户名（上述页面中显示的）:")
+            self.data["wecom_caldav_username"] = input("  > ").strip()
+            print("  🔑 企业微信 CalDAV 密码:")
+            self.data["wecom_caldav_password"] = getpass.getpass("  > ")
+            print("  📅 只同步某个日历？留空 = 全部同步:")
+            wc = input("  > ").strip()
             if wc:
                 self.data["wecom_calendar_name"] = wc
 
-        # ===== 飞书 =====
-        print("\n" + "=" * 50)
-        print("【可选】飞书日程同步")
-        print("-" * 40)
-        print("将飞书的日程同步到你的苹果日历中")
-        print("配置方法: 飞书 → 设置 → 日历 → 第三方日历管理 → CalDAV 同步")
-        feishu = input("\n启用飞书同步？[y/N] ").strip().lower()
+        print()
+        print("📱 你用飞书吗？")
+        print("   如果用，需要获取 CalDAV 同步信息:")
+        print("   飞书 App → 头像 → 设置 → 日历 → 第三方日历管理 → CalDAV 同步")
+        feishu = input("  启用飞书同步？[y/N] ").strip().lower()
         if feishu in ('y', 'yes'):
             self.data["feishu_enabled"] = True
-            print("\n👤 飞书 CalDAV 用户名:")
-            self.data["feishu_caldav_username"] = input("> ").strip()
-            print("🔑 飞书 CalDAV 密码:")
-            self.data["feishu_caldav_password"] = getpass.getpass("> ")
-            print("🌐 飞书 CalDAV 服务器地址 (飞书设置中获取):")
-            self.data["feishu_caldav_server"] = input("> ").strip()
-            print("📅 要同步的日历名称 (留空=同步全部):")
-            fc = input("> ").strip()
+            print()
+            print("  👤 飞书 CalDAV 用户名:")
+            self.data["feishu_caldav_username"] = input("  > ").strip()
+            print("  🔑 飞书 CalDAV 密码:")
+            self.data["feishu_caldav_password"] = getpass.getpass("  > ")
+            print("  🌐 飞书 CalDAV 服务器地址（上述页面中显示的）:")
+            self.data["feishu_caldav_server"] = input("  > ").strip()
+            print("  📅 只同步某个日历？留空 = 全部同步:")
+            fc = input("  > ").strip()
             if fc:
                 self.data["feishu_calendar_name"] = fc
 
         # ===== FindMy 定位 =====
-        print("\n" + "=" * 50)
-        print("【可选】FindMy 定位 + 地图")
-        print("-" * 40)
-        print("启用后可显示：GPS 位置、电子围栏、通勤检测、回家距离等")
-        print("需要：Apple ID 主密码 + 高德地图 API Key + 家/公司坐标")
-        loc = input("\n启用定位功能？[y/N] ").strip().lower()
+        print()
+        print("━━━━ 第三步：GPS 定位（可选，大多数人不需要）━━━━")
+        print()
+        print("  开启后共享日历会显示位置状态，比如:")
+        print("  🏠 在家 / 🏢 搬砖中 / 🚗 正在下班途中，距离家 3.2km")
+        print()
+        print("  需要额外提供:")
+        print("  • Apple ID 登录密码（真正的登录密码，用于 Find My）")
+        print("  • 高德地图 API Key（lbs.amap.com 申请）")
+        print("  • 家和公司的经纬度坐标")
+        print()
+        print("  💡 不开启的话，没日程时会显示「✅ 空闲」，也完全够用")
+        loc = input("  启用 GPS 定位？[y/N] ").strip().lower()
         if loc in ('y', 'yes'):
             self.data["location_enabled"] = True
 
-            print("\n🔑 Apple ID 主密码 (用于 Find My 定位):")
-            self.data["icloud_password"] = getpass.getpass("> ")
+            print()
+            print("  🔑 Apple ID 登录密码（用于 iCloud Find My）:")
+            print("     ⚠️ 这次是真正的登录密码，不是应用专用密码")
+            print("     首次使用会触发双重认证，需要你手动输入验证码")
+            self.data["icloud_password"] = getpass.getpass("  > ")
 
-            print("\n🗺️ 高德地图 Web 服务 API Key:")
-            print("  在 https://lbs.amap.com 申请")
-            self.data["amap_api_key"] = input("> ").strip()
+            print()
+            print("  🗺️ 高德地图 Web 服务 API Key:")
+            print("     获取: lbs.amap.com → 控制台 → 应用管理 → 创建应用 → 添加 Key")
+            print("     服务平台选「Web服务」")
+            self.data["amap_api_key"] = input("  > ").strip()
 
-            print("\n🏠 家位置 - 纬度:")
+            print()
+            print("  🏠 家的位置（在 lbs.amap.com/tools/picker 搜索地址后点击获取）")
+            print("     纬度 (lat):")
             self._input_float("home_location", "lat")
-            print("🏠 家位置 - 经度:")
+            print("     经度 (lon):")
             self._input_float("home_location", "lon")
-            print("🏠 家位置 - 围栏半径 (默认200米):")
+            print("     围栏半径（默认 200 米，直接回车跳过）:")
             self._input_float("home_location", "radius", allow_empty=True)
 
-            print("\n🏢 公司位置 - 纬度:")
+            print()
+            print("  🏢 公司的位置（同样方法获取）")
+            print("     纬度 (lat):")
             self._input_float("work_location", "lat")
-            print("🏢 公司位置 - 经度:")
+            print("     经度 (lon):")
             self._input_float("work_location", "lon")
-            print("🏢 公司位置 - 围栏半径 (默认200米):")
+            print("     围栏半径（默认 200 米，直接回车跳过）:")
             self._input_float("work_location", "radius", allow_empty=True)
 
             # 确保 cookie 目录存在
@@ -426,31 +457,32 @@ class Config:
             cookie_dir.mkdir(parents=True, exist_ok=True)
 
         # ===== 保存 =====
-        print("\n" + "=" * 50)
+        print()
+        print("=" * 55)
         if self.save():
-            print(f"✅ 配置已保存到 {self.CONFIG_PATH}")
+            print(f"  ✅ 配置已保存到 {self.CONFIG_PATH}")
             print()
             self._print_summary()
+            print()
+            print("  接下来运行:")
+            if self.is_wecom_enabled() or self.is_feishu_enabled():
+                print("    status_wall sync    ← 同步外部日程")
+            print("    status_wall start   ← 启动守护进程")
+            print("    status_wall status  ← 查看运行状态")
         else:
-            print("❌ 配置保存失败")
+            print("  ❌ 配置保存失败")
 
     def _print_summary(self):
         """打印配置摘要"""
-        print("📋 配置摘要:")
-        print(f"  iCloud 用户: {self.data['icloud_username']}")
-        print(f"  共享日历: {self.data['shared_calendar_name']}")
-        if self.is_wecom_enabled():
-            print(f"  ✅ 企业微信同步: 已启用")
-        else:
-            print(f"  ⬜ 企业微信同步: 未启用")
-        if self.is_feishu_enabled():
-            print(f"  ✅ 飞书同步: 已启用")
-        else:
-            print(f"  ⬜ 飞书同步: 未启用")
-        if self.is_location_enabled():
-            print(f"  ✅ FindMy 定位: 已启用")
-        else:
-            print(f"  ⬜ FindMy 定位: 未启用（仅显示日程状态）")
+        print("  📋 配置摘要:")
+        print(f"     iCloud 账号:    {self.data['icloud_username']}")
+        print(f"     共享日历:       {self.data['shared_calendar_name']}")
+        wecom_status = "✅ 已启用" if self.is_wecom_enabled() else "—  未启用"
+        feishu_status = "✅ 已启用" if self.is_feishu_enabled() else "—  未启用"
+        location_status = "✅ 已启用" if self.is_location_enabled() else "—  未启用"
+        print(f"     企业微信同步:   {wecom_status}")
+        print(f"     飞书同步:       {feishu_status}")
+        print(f"     GPS 定位:       {location_status}")
 
     def _input_float(self, section, key, allow_empty=False):
         """安全读取浮点数输入"""

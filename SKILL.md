@@ -13,46 +13,116 @@ This skill provides the complete knowledge and implementation patterns for build
 
 ## User Onboarding Guide
 
-When a user activates this skill, present the following layered setup guide:
+When a user activates this skill, the AI MUST present the following guide **in Chinese** and wait for the user to provide the required credentials before generating any code. Do NOT dump all tiers at once — walk through them step by step.
+
+### Step 1: Explain what this does (always show first)
 
 ```
-🍎 Apple iCloud 状态墙 — 你需要准备什么？
+🍎 Apple iCloud 状态墙
 
-【必填】iCloud 日历基础功能
-┌─────────────────┬──────────────────────────────────────────┐
-│ Apple ID 邮箱    │ 你的 Apple 账号邮箱                        │
-│ 应用专用密码      │ appleid.apple.com → 登录 → 应用专用密码 → 生成│
-└─────────────────┴──────────────────────────────────────────┘
-  ⚠️ 注意：是「应用专用密码」，不是你的 Apple ID 登录密码！
-  ⚠️ 还需要在 iCloud 日历中创建一个「共享日历」并邀请家人
+它能做什么？
+把你的日程自动同步到一个 iCloud 共享日历里，你的家人订阅这个日历后，
+就能随时看到你现在在忙什么。
 
-【可选】企业微信日程同步
-┌─────────────────┬──────────────────────────────────────────┐
-│ CalDAV 用户名     │ 企业微信 → 日程 → ⋯ → 设置 → 同步到系统日历   │
-│ CalDAV 密码       │ 同上页面获取                               │
-└─────────────────┴──────────────────────────────────────────┘
-
-【可选】飞书日程同步
-┌─────────────────┬──────────────────────────────────────────┐
-│ CalDAV 用户名     │ 飞书 → 设置 → 日历 → 第三方日历管理 → CalDAV  │
-│ CalDAV 密码       │ 同上页面获取                               │
-│ CalDAV 服务器     │ 同上页面获取                               │
-└─────────────────┴──────────────────────────────────────────┘
-
-【可选】GPS 定位（在家/公司/通勤状态）
-┌─────────────────┬──────────────────────────────────────────┐
-│ Apple ID 主密码   │ 你的 Apple 登录密码（用于 Find My 定位）      │
-│ 高德 API Key     │ lbs.amap.com → 控制台 → 应用管理 → 创建应用  │
-│ 家的经纬度       │ 高德地图网页版右键点击获取                      │
-│ 公司的经纬度     │ 同上                                       │
-└─────────────────┴──────────────────────────────────────────┘
-  💡 如果你只需要展示日程状态，不需要配置这部分
-
-安装步骤：
-  1. status_wall init       # 交互式配置（会引导你选择启用哪些功能）
-  2. status_wall sync       # 同步企业微信/飞书日程（如已配置）
-  3. status_wall start      # 启动守护进程
+例如：
+  🚫 产品评审会 (勿扰)     ← 你的 iCloud 日程
+  📅 [飞书] 需求评审        ← 自动从飞书同步过来的
+  📅 [企微] 部门例会        ← 自动从企业微信同步过来的
+  ✅ 空闲                   ← 没有日程时
+  🏠 在家                   ← 开启 GPS 定位后（可选）
+  🚗 正在下班途中，距离家 3.2km  ← 开启 GPS 定位后（可选）
 ```
+
+### Step 2: Core setup (required, always ask)
+
+```
+━━━━ 第一步：iCloud 日历（必填）━━━━
+
+需要你提供两样东西：
+
+① Apple ID 邮箱
+   就是你登录 iCloud 用的那个邮箱
+
+② 应用专用密码（⚠️ 不是你的 Apple 登录密码！）
+   这是 Apple 专门给第三方应用用的一次性密码
+   获取方法：
+     1. 打开 https://appleid.apple.com
+     2. 登录你的 Apple ID
+     3. 找到「App 专用密码」(英文叫 App-Specific Passwords)
+     4. 点「生成」，给它取个名字（比如"状态墙"）
+     5. 复制生成的密码（格式类似 xxxx-xxxx-xxxx-xxxx）
+
+另外，你还需要提前做一件事：
+   打开 iPhone/Mac 的「日历」App → 新建一个日历 → 命名（比如"家庭共享"）
+   → 右键/长按 → 共享 → 邀请你的家人
+
+准备好了就把 Apple ID 邮箱和应用专用密码给我。
+```
+
+### Step 3: External calendar sync (optional, ask after core is done)
+
+```
+━━━━ 第二步：工作日程同步（可选）━━━━
+
+你用企业微信或飞书吗？可以把工作日程自动同步到苹果日历里，
+这样家人也能看到你的工作安排。
+
+📌 同步是单向的：只从企业微信/飞书读取 → 写入苹果日历，不会反向写入。
+
+如果你用【企业微信】：
+  打开企业微信 App → 底部「工作台」→「日程」
+  → 右上角 ⋯ →「设置」→「同步到系统日历」
+  → 页面会显示 CalDAV 的用户名和密码，把它们给我
+  （服务器地址不用管，固定是 caldav.wecom.work）
+
+如果你用【飞书】：
+  打开飞书 App → 头像 →「设置」→「日历」
+  →「第三方日历管理」→「CalDAV 同步配置」
+  → 页面会显示用户名、密码、服务器地址，把它们给我
+
+不用的话直接跳过就行。
+```
+
+### Step 4: Location features (optional, ask last)
+
+```
+━━━━ 第三步：GPS 定位（可选，大多数人不需要）━━━━
+
+这个功能可以让共享日历显示你的实时位置状态，比如：
+  🏠 在家  /  🏢 搬砖中  /  🚗 正在下班途中，距离家 3.2km
+
+但配置比较麻烦，需要以下 4 样东西：
+
+① Apple ID 登录密码（注意：这次是真正的登录密码，不是应用专用密码）
+   用于通过 iCloud Find My 获取你 iPhone 的 GPS 坐标
+   ⚠️ 首次使用会触发 Apple 双重认证，需要你手动输入验证码
+
+② 高德地图 API Key
+   获取方法：
+     1. 打开 https://lbs.amap.com → 注册/登录
+     2. 控制台 → 应用管理 → 创建新应用
+     3. 添加 Key → 服务平台选「Web服务」
+     4. 复制生成的 Key
+
+③ 家的经纬度坐标
+   打开 https://lbs.amap.com/tools/picker → 搜索你家地址
+   → 地图上点击精确位置 → 右侧会显示经纬度，复制下来
+
+④ 公司的经纬度坐标
+   同上方法获取公司位置的经纬度
+
+💡 如果你只想让家人看到日程状态，跳过这步就行。
+   没有 GPS 定位时，没日程就显示「✅ 空闲」。
+```
+
+### AI behavior rules for onboarding
+
+1. **Always start with Step 1 + Step 2**. Do NOT mention GPS/location unless the user asks or finishes Step 2.
+2. After user provides Apple ID + app-specific password, **immediately generate the project and test the connection** before asking about Step 3.
+3. For Step 3, ask "你用企业微信或飞书吗？" — only expand the detailed instructions for the platform the user says yes to.
+4. For Step 4, only mention it if the user asks about location/GPS, or after Steps 2+3 are fully working. Lead with "大多数人不需要这个".
+5. **Never ask for all credentials at once.** Walk through one step at a time.
+6. When displaying the setup table, use the Chinese instructions above, not English.
 
 ## Core Architecture
 

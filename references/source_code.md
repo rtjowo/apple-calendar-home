@@ -887,7 +887,7 @@ class StatusWallDaemon:
     def _maybe_sync_external(self):
         """定期同步外部日历（每 30 分钟）"""
         now = time.time()
-        sync_interval = 1800  # 30 分钟
+        sync_interval = 900  # 15 分钟
         if now - self._last_sync_time >= sync_interval:
             if config.is_wecom_enabled() or config.is_feishu_enabled():
                 try:

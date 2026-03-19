@@ -13,85 +13,153 @@ This skill provides the complete knowledge and implementation patterns for build
 
 ## User Onboarding Guide
 
-When a user activates this skill, the AI MUST present the following guide **in Chinese** and wait for the user to provide the required credentials before generating any code. Do NOT dump all tiers at once — walk through them step by step.
+When a user activates this skill, the AI MUST present the following guide **in Chinese** and walk through step by step. Do NOT dump everything at once.
 
-### Step 1: Explain what this does (always show first)
-
-```
-🍎 Apple iCloud 状态墙
-
-它能做什么？
-把你的日程自动同步到一个 iCloud 共享日历里，你的家人订阅这个日历后，
-就能随时看到你现在在忙什么。
-
-例如：
-  🚫 产品评审会 (勿扰)     ← 你的 iCloud 日程
-  📅 [飞书] 需求评审        ← 自动从飞书同步过来的
-  📅 [企微] 部门例会        ← 自动从企业微信同步过来的
-  ✅ 空闲                   ← 没有日程时
-  🏠 在家                   ← 开启 GPS 定位后（可选）
-  🚗 正在下班途中，距离家 3.2km  ← 开启 GPS 定位后（可选）
-```
-
-### Step 2: Core setup (required, always ask)
+### Step 1: Welcome — explain what this does (ALWAYS show first)
 
 ```
-━━━━ 第一步：iCloud 日历（必填）━━━━
+🍎 iCloud 日历状态墙
 
-需要你提供两样东西：
+嘿！这个工具可以帮你搞定一件事：
 
-① Apple ID 邮箱
-   就是你登录 iCloud 用的那个邮箱
+    让你的家人随时知道你在忙什么
 
-② 应用专用密码（⚠️ 不是你的 Apple 登录密码！）
-   这是 Apple 专门给第三方应用用的一次性密码
-   获取方法：
-     1. 打开 https://appleid.apple.com
-     2. 登录你的 Apple ID
-     3. 找到「App 专用密码」(英文叫 App-Specific Passwords)
-     4. 点「生成」，给它取个名字（比如"状态墙"）
-     5. 复制生成的密码（格式类似 xxxx-xxxx-xxxx-xxxx）
+原理很简单：它会读取你各个平台的日程（iCloud / 企业微信 / 飞书），
+汇总后写入一个 iCloud 共享日历。你的家人订阅这个日历，就能看到：
 
-另外，你还需要提前做一件事：
-   打开 iPhone/Mac 的「日历」App → 新建一个日历 → 命名（比如"家庭共享"）
-   → 右键/长按 → 共享 → 邀请你的家人
+  📅 产品评审会            ← 你 iCloud 里的日程
+  📅 [飞书] 需求评审        ← 自动从飞书同步
+  📅 [企微] 部门周会        ← 自动从企业微信同步
+  ✅ 空闲                   ← 当前没有日程
 
-准备好了就把 Apple ID 邮箱和应用专用密码给我。
+同步每 15 分钟自动刷新一次。
+
+下面我一步步带你配置，很快的。
 ```
 
-### Step 3: External calendar sync (optional, ask after core is done)
+### Step 2: Collect credentials — what do you need and how to get it
+
+After showing Step 1, the AI MUST say:
 
 ```
-━━━━ 第二步：工作日程同步（可选）━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+我需要你提供一些信息来连接各个日历平台。
+先告诉我你用哪些：
 
-你用企业微信或飞书吗？可以把工作日程自动同步到苹果日历里，
-这样家人也能看到你的工作安排。
+  ✅ iCloud 日历 — 必须的，这是基础
+  📌 企业微信日历 — 可选，如果你公司用企微
+  📌 飞书日历 — 可选，如果你公司用飞书
 
-📌 同步是单向的：只从企业微信/飞书读取 → 写入苹果日历，不会反向写入。
+下面是每项需要的信息和获取方法👇
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-如果你用【企业微信】：
-  打开企业微信 App → 底部「工作台」→「日程」
-  → 右上角 ⋯ →「设置」→「同步到系统日历」
-  → 页面会显示 CalDAV 的用户名和密码，把它们给我
-  （服务器地址不用管，固定是 caldav.wecom.work）
+【iCloud — 必填】
 
-如果你用【飞书】：
-  打开飞书 App → 头像 →「设置」→「日历」
-  →「第三方日历管理」→「CalDAV 同步配置」
-  → 页面会显示用户名、密码、服务器地址，把它们给我
+  ① Apple ID 邮箱
+     就是你登录 iCloud 用的那个邮箱
 
-不用的话直接跳过就行。
+  ② 应用专用密码（⚠️ 不是你的 Apple ID 登录密码！）
+     这是 Apple 专门为第三方 App 生成的密码，获取方法：
+       1. 打开 https://appleid.apple.com → 登录
+       2. 找到「App 专用密码」(App-Specific Passwords)
+       3. 点「生成」，名字随便填（比如"状态墙"）
+       4. 复制生成的密码（格式：xxxx-xxxx-xxxx-xxxx）
+
+【企业微信 — 可选】
+
+  ① CalDAV 用户名
+  ② CalDAV 密码
+     获取方法：
+       打开企业微信 App → 底部「工作台」→「日程」
+       → 右上角 ⋯ →「设置」→「同步到系统日历」
+       → 页面会显示用户名和密码，复制给我就行
+     （服务器地址不用管，我知道是 caldav.wecom.work）
+
+【飞书 — 可选】
+
+  ① CalDAV 用户名
+  ② CalDAV 密码
+  ③ CalDAV 服务器地址
+     获取方法：
+       打开飞书 App → 头像 →「设置」→「日历」
+       →「第三方日历管理」→「CalDAV 同步配置」
+       → 页面会显示用户名、密码和服务器地址，都复制给我
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+准备好了就把上面这些信息发给我，
+不用的平台直接跳过不填就行。
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-### Step 4: Location features (optional, ask last)
+### Step 3: After receiving credentials — generate project, test, and sync
+
+After the user provides credentials, the AI MUST:
+1. Generate the project and write config file
+2. Immediately test all connections (do NOT ask)
+3. Immediately run sync (do NOT ask)
+4. Report results
+
+Then proceed to Step 4.
+
+### Step 4: Shared calendar setup
+
+After sync succeeds, the AI MUST say:
 
 ```
-━━━━ 第三步：GPS 定位（可选，大多数人不需要）━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ 连接和同步都成功了！
 
-这个功能可以让共享日历显示你的实时位置状态，比如：
+现在还差最后一步：创建一个共享日历，让你的家人能看到。
+
+📱 iPhone 操作方法：
+  1. 打开「日历」App
+  2. 底部点「日历」（日历列表）
+  3. 左下角点「添加日历」
+  4. 给日历取个名字（比如「家庭共享」或「我的状态」）
+  5. 创建后，点击这个日历右边的 ⓘ
+  6. 往下找到「共享」→「添加人员」→ 输入家人的 Apple ID 邮箱
+  7. 家人会收到一个日历订阅邀请，接受后就能看到了
+
+💻 Mac 操作方法：
+  1. 打开「日历」App
+  2. 左侧栏右键 →「新建日历」
+  3. 命名后，右键这个日历 →「共享日历」
+  4. 添加家人的 Apple ID 邮箱
+
+创建好后，把日历名字告诉我（比如「家庭共享」），我来配置写入目标。
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+### Step 5: After receiving calendar name — configure and start daemon
+
+After user provides the shared calendar name:
+1. Update config: `shared_calendar_name` = user's calendar name
+2. Run one more sync to verify writing to the correct calendar
+3. Start the daemon automatically (every 15 minutes refresh)
+4. Report final status
+
+```
+✅ 全部搞定！
+
+你的日历状态墙已经在运行了：
+  • 同步间隔：每 15 分钟自动刷新
+  • 共享日历：「{calendar_name}」
+  • 数据来源：iCloud{" + 企业微信" if wecom}" + 飞书" if feishu}
+
+你的家人订阅「{calendar_name}」后，就能随时看到你的日程状态了。
+```
+
+### Step 6: GPS location (optional, only mention if user asks or everything else is done)
+
+Only show this if the user specifically asks about location/GPS features, or after everything above is working perfectly. Lead with "大多数人不需要这个".
+
+```
+━━━━ GPS 定位（可选，大多数人不需要）━━━━
+
+这个功能可以让共享日历显示你的实时位置状态：
   🏠 在家  /  🏢 搬砖中  /  🚗 正在下班途中，距离家 3.2km
 
-但配置比较麻烦，需要以下 4 样东西：
+但配置比较麻烦，需要 4 样东西：
 
 ① Apple ID 登录密码（注意：这次是真正的登录密码，不是应用专用密码）
    用于通过 iCloud Find My 获取你 iPhone 的 GPS 坐标
@@ -111,18 +179,19 @@ When a user activates this skill, the AI MUST present the following guide **in C
 ④ 公司的经纬度坐标
    同上方法获取公司位置的经纬度
 
-💡 如果你只想让家人看到日程状态，跳过这步就行。
-   没有 GPS 定位时，没日程就显示「✅ 空闲」。
+💡 没有 GPS 定位时，没日程就显示「✅ 空闲」，够用了。
 ```
 
 ### AI behavior rules for onboarding
 
-1. **Always start with Step 1 + Step 2**. Do NOT mention GPS/location unless the user asks or finishes Step 2.
-2. After user provides Apple ID + app-specific password, **immediately generate the project and test the connection** before asking about Step 3.
-3. For Step 3, ask "你用企业微信或飞书吗？" — only expand the detailed instructions for the platform the user says yes to.
-4. For Step 4, only mention it if the user asks about location/GPS, or after Steps 2+3 are fully working. Lead with "大多数人不需要这个".
-5. **Never ask for all credentials at once.** Walk through one step at a time.
-6. When displaying the setup table, use the Chinese instructions above, not English.
+1. **Always show Step 1 first.** Let the user understand what this does before asking for anything.
+2. **Then show Step 2 in full** — list ALL platforms (iCloud + WeCom + Feishu) at once with their credential requirements and how to get them. Do NOT split into multiple back-and-forth rounds. Let the user provide everything they have in one message.
+3. **After receiving credentials → immediately generate project, test connections, and run sync.** Do NOT ask "要我帮你测试吗？" or "要我同步吗？". Just do it.
+4. **After sync succeeds → show Step 4 (shared calendar setup).** Explain how to create a shared calendar on iPhone/Mac, then ask the user for the calendar name.
+5. **After receiving calendar name → update config, run one more sync, start daemon.** The daemon syncs every 15 minutes.
+6. **GPS/location (Step 6) — only mention if the user asks**, or after everything else is working perfectly. Lead with "大多数人不需要这个".
+7. **Never skip the shared calendar step.** Without it, family can't see anything.
+8. When displaying instructions, use the Chinese text from the Steps above, not English.
 
 ### AI behavior rules for config file generation
 
@@ -180,11 +249,16 @@ After generating the project and writing the config:
    - If WeCom is enabled: use RAW HTTP requests (`requests` library) with individual `GET` to read events, then sync to iCloud. **Do NOT use the `caldav` library for WeCom — root URL returns 403.**
    - Reports results
 
-2. **If "Status Wall" calendar doesn't exist**, tell the user to create it, but **don't treat it as a blocking error** — use any available calendar temporarily and mention the user needs to create the shared one.
+2. **After the user provides a shared calendar name**, update `shared_calendar_name` in config, then run sync once more to verify writing to the correct calendar.
 
-3. **Auto-run sync on first deployment.** After the project is generated, if Feishu/WeCom is enabled, run `status_wall sync` or equivalent Python code automatically. Don't just say "you can run sync later".
+3. **Auto-start the daemon with 15-minute polling interval.** The daemon should:
+   - Sync external calendars (WeCom/Feishu) every 15 minutes
+   - Read iCloud private calendar and determine current status every 15 minutes
+   - Write status to the shared calendar
+   - Config: `"polling_interval": 900` (900 seconds = 15 minutes)
+   Do NOT ask "要我帮你启动守护进程吗？" — just start it.
 
-4. **Auto-start the daemon.** After successful testing, start the daemon automatically. Don't ask "要我帮你启动守护进程吗？"
+4. **If the shared calendar doesn't exist yet**, tell the user how to create it (Step 4 from onboarding), but **don't treat it as a blocking error** — use any available calendar temporarily.
 
 ### ⚠️⚠️⚠️ CRITICAL: Do NOT use `caldav` library for Feishu or WeCom ⚠️⚠️⚠️
 
@@ -483,7 +557,7 @@ Sync WeCom/Feishu events to user's iCloud private calendar via CalDAV.
 - **Clean-then-write**: Before writing new events, delete all existing events with matching tag prefix within the time range. Prevents duplicates.
 - **UUID-based UID**: Each synced event gets `sw-sync-{uuid4}@status-wall` UID.
 - **All-day event handling**: Properly handles both timed events and all-day events (date vs datetime).
-- **Periodic sync**: Daemon calls `_maybe_sync_external()` every 30 minutes automatically.
+- **Periodic sync**: Daemon calls `_maybe_sync_external()` every 15 minutes automatically.
 - **WeCom CalDAV server**: `https://caldav.wecom.work/.well-known/caldav` (root `/` returns 403, must use well-known endpoint)
 - **Feishu CalDAV server**: User-provided (varies by organization). Code MUST auto-prepend `https://` if missing.
 - **⚠️ Both Feishu and WeCom use RAW HTTP, not caldav library**: Neither server fully supports standard CalDAV protocol. Each has a dedicated `_read_xxx_events_raw()` method using pure `requests`.
@@ -499,7 +573,7 @@ Main daemon with optional location services.
 **Critical design decisions:**
 - **Conditional imports**: Location services (LocationService, AMapService, StateManager) are imported only when `config.is_location_enabled()`. Missing `pyicloud` won't crash the daemon.
 - **Calendar-only mode**: When location is disabled, `_determine_calendar_only_state()` provides simple event/free status.
-- **Automatic external sync**: `_maybe_sync_external()` runs every 30 minutes within the main loop.
+- **Automatic external sync**: `_maybe_sync_external()` runs every 15 minutes within the main loop.
 - **Feature logging**: On startup, logs which features are enabled.
 
 ### 4. Location Service (`location_service.py`) — OPTIONAL

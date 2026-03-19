@@ -186,6 +186,115 @@ After generating the project and writing the config:
 
 4. **Auto-start the daemon.** After successful testing, start the daemon automatically. Don't ask "要我帮你启动守护进程吗？"
 
+### AI behavior rules for CalDAV code generation (CRITICAL)
+
+When writing ANY code that interacts with CalDAV (connection test scripts, sync modules, etc.), the AI MUST follow these **exact patterns**. Deviating from these will cause silent failures.
+
+#### 1. NEVER use `date_search()` — it is DEPRECATED
+
+```python
+# ❌ WRONG — will fail silently or return empty
+events = calendar.date_search(start=start, end=end)
+
+# ✅ CORRECT — use search() with event=True
+events = calendar.search(start=start, end=end, event=True)
+```
+
+`date_search()` is deprecated in caldav >= 1.x and may return empty results on some servers (including Feishu). Always use `calendar.search(start=start, end=end, event=True)`.
+
+#### 2. Use a WIDE time range for reading events (±30 days minimum)
+
+```python
+# ❌ WRONG — too narrow, will miss events
+start = datetime.now() - timedelta(hours=1)
+end = datetime.now() + timedelta(days=7)
+
+# ✅ CORRECT — wide range to ensure events are found
+start = datetime.now() - timedelta(days=30)
+end = datetime.now() + timedelta(days=30)
+```
+
+Feishu CalDAV may have timezone or date boundary issues with narrow ranges. Always use ±30 days for the initial test/sync to ensure events are found. The daemon can use a narrower range (7 days) for routine sync.
+
+#### 3. Feishu CalDAV server URL must have `https://` prefix
+
+```python
+server = config.get("feishu_caldav_server", "")
+if not server.startswith("http"):
+    server = f"https://{server}"
+```
+
+Users may provide just `caldav.feishu.cn` without the protocol. The code MUST auto-prepend `https://`.
+
+#### 4. Always try ALL calendars if calendar_name doesn't match
+
+```python
+calendars = principal.calendars()
+target = None
+if calendar_name:
+    for cal in calendars:
+        if cal.name and calendar_name.lower() in cal.name.lower():
+            target = cal
+            break
+# If no match, search ALL calendars
+if not target:
+    for cal in calendars:
+        events = cal.search(start=start, end=end, event=True)
+        if events:
+            # found events in this calendar
+            ...
+```
+
+#### 5. Feishu CalDAV connection test template
+
+When testing Feishu CalDAV, use EXACTLY this pattern:
+
+```python
+from caldav import DAVClient
+from datetime import datetime, timedelta
+from icalendar import Calendar as iCalendar
+
+server = feishu_caldav_server
+if not server.startswith("http"):
+    server = f"https://{server}"
+
+client = DAVClient(url=server, username=feishu_username, password=feishu_password, timeout=30)
+principal = client.principal()
+calendars = principal.calendars()
+print(f"找到 {len(calendars)} 个飞书日历")
+
+now = datetime.now()
+start = now - timedelta(days=30)
+end = now + timedelta(days=30)
+
+total_events = 0
+for cal in calendars:
+    print(f"  日历: {cal.name}")
+    events = cal.search(start=start, end=end, event=True)  # MUST use search(), NOT date_search()
+    print(f"    事件数: {len(events)}")
+    total_events += len(events)
+    for ev in events:
+        ical = iCalendar.from_ical(ev.data)
+        for component in ical.walk():
+            if component.name == "VEVENT":
+                summary = component.get("summary", "")
+                dtstart = component.get("dtstart")
+                print(f"    - {summary} ({dtstart.dt if dtstart else 'N/A'})")
+
+if total_events == 0:
+    print("⚠️ 未找到事件，请确认飞书日历中有日程，且 CalDAV 同步已开启")
+else:
+    print(f"✅ 共找到 {total_events} 个飞书日程")
+```
+
+#### 6. DAVClient must set timeout=30
+
+Feishu CalDAV can be slow. Always set `timeout=30`:
+
+```python
+client = DAVClient(url=server, username=username, password=password, timeout=30)
+```
+
 ## Core Architecture
 
 ```
@@ -328,7 +437,10 @@ Sync WeCom/Feishu events to user's iCloud private calendar via CalDAV.
 - **All-day event handling**: Properly handles both timed events and all-day events (date vs datetime).
 - **Periodic sync**: Daemon calls `_maybe_sync_external()` every 30 minutes automatically.
 - **WeCom CalDAV server**: `https://caldav.wecom.work`
-- **Feishu CalDAV server**: User-provided (varies by organization).
+- **Feishu CalDAV server**: User-provided (varies by organization). Code MUST auto-prepend `https://` if missing.
+- **⚠️ MUST use `calendar.search(start=start, end=end, event=True)`** — NOT `date_search()` which is deprecated and returns empty on Feishu.
+- **⚠️ Time range for reading**: Use ±30 days (NOT just 7 days forward). Feishu CalDAV may have timezone issues with narrow ranges.
+- **⚠️ DAVClient timeout**: Always set `timeout=30` — Feishu CalDAV can be slow.
 
 ### 3. Daemon (`daemon.py`) — REFACTORED
 

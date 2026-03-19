@@ -1930,6 +1930,7 @@ class ExternalCalendarSync:
                 url=server_url,
                 username=username,
                 password=password,
+                timeout=30,
             )
             principal = client.principal()
             return principal
@@ -1937,8 +1938,8 @@ class ExternalCalendarSync:
             logger.error(f"外部 CalDAV 连接失败 ({server_url}): {e}")
             return None
 
-    def _read_events_from_external(self, principal, calendar_name="", days_ahead=7):
-        """从外部日历读取未来 N 天的事件"""
+    def _read_events_from_external(self, principal, calendar_name="", days_ahead=30):
+        """从外部日历读取事件（默认 ±30 天宽范围，确保飞书等外部日历能正确返回结果）"""
         events_list = []
         try:
             calendars = principal.calendars()
@@ -1956,7 +1957,7 @@ class ExternalCalendarSync:
                 target_calendars = calendars
 
             now = datetime.now()
-            start = now - timedelta(hours=1)
+            start = now - timedelta(days=days_ahead)
             end = now + timedelta(days=days_ahead)
 
             for cal in target_calendars:

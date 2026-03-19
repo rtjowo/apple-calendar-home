@@ -124,6 +124,68 @@ When a user activates this skill, the AI MUST present the following guide **in C
 5. **Never ask for all credentials at once.** Walk through one step at a time.
 6. When displaying the setup table, use the Chinese instructions above, not English.
 
+### AI behavior rules for config file generation
+
+When writing `~/.status_wall.json`, the AI MUST follow these rules:
+
+1. **Always set feature flags explicitly.** If the user provided WeCom credentials, set `"wecom_enabled": true`. If the user provided Feishu credentials, set `"feishu_enabled": true`. If the user provided GPS-related info, set `"location_enabled": true`. **Do NOT omit these boolean flags** — the code checks them before attempting connections.
+
+2. **Config file template** — the AI should generate exactly this structure (filling in user values, removing unused optional sections):
+
+```json
+{
+  "icloud_username": "<user's Apple ID email>",
+  "icloud_app_password": "<user's app-specific password>",
+  "private_calendar_name": "",
+  "shared_calendar_name": "Status Wall",
+  "wecom_enabled": false,
+  "wecom_caldav_username": "",
+  "wecom_caldav_password": "",
+  "wecom_calendar_name": "",
+  "feishu_enabled": false,
+  "feishu_caldav_username": "",
+  "feishu_caldav_password": "",
+  "feishu_caldav_server": "",
+  "feishu_calendar_name": "",
+  "location_enabled": false,
+  "icloud_password": "",
+  "amap_api_key": "",
+  "home_location": {"lat": 0.0, "lon": 0.0, "radius": 200},
+  "work_location": {"lat": 0.0, "lon": 0.0, "radius": 200},
+  "polling_interval": 900,
+  "commute_polling_interval": 60,
+  "log_level": "INFO",
+  "data_file": "~/.status_wall_state.json",
+  "cookie_directory": "~/.status_wall_cookies"
+}
+```
+
+Example: if user provided Feishu credentials, the config MUST have:
+```json
+{
+  "feishu_enabled": true,
+  "feishu_caldav_username": "u_xxx",
+  "feishu_caldav_password": "xxx",
+  "feishu_caldav_server": "caldav.feishu.cn"
+}
+```
+
+### AI behavior rules for testing
+
+After generating the project and writing the config:
+
+1. **Immediately run a connection test** — do NOT ask the user "要我帮你测试吗？", just do it. Write and execute a small Python script that:
+   - Connects to iCloud CalDAV and lists calendars
+   - If Feishu is enabled: connects to Feishu CalDAV, reads events, syncs to iCloud
+   - If WeCom is enabled: connects to WeCom CalDAV, reads events, syncs to iCloud
+   - Reports results
+
+2. **If "Status Wall" calendar doesn't exist**, tell the user to create it, but **don't treat it as a blocking error** — use any available calendar temporarily and mention the user needs to create the shared one.
+
+3. **Auto-run sync on first deployment.** After the project is generated, if Feishu/WeCom is enabled, run `status_wall sync` or equivalent Python code automatically. Don't just say "you can run sync later".
+
+4. **Auto-start the daemon.** After successful testing, start the daemon automatically. Don't ask "要我帮你启动守护进程吗？"
+
 ## Core Architecture
 
 ```

@@ -898,7 +898,7 @@ class StatusWallDaemon:
             self._last_sync_time = now
 
     def run_once(self):
-        """单次执行状态更新"""
+        """单次执行状态更新 — 4 级优先级判断"""
         try:
             logger.info("-" * 40)
             logger.info("开始状态更新轮询")
@@ -906,17 +906,50 @@ class StatusWallDaemon:
             # 0. 定期同步外部日历
             self._maybe_sync_external()
 
-            # 1. 获取当前日程 (P1)
-            current_event = None
+            # 1. 获取当前所有活跃日程（含来源分类）
+            active_events = []
             try:
-                current_event = self.calendar_reader.get_current_event()
+                active_events = self.calendar_reader.get_current_events()
             except Exception as e:
                 logger.warning(f"读取日程异常(非致命): {e}")
 
-            location = None
+            # 分离原生事件和同步事件
+            native_events = [(n, b, s) for n, b, s in active_events if s == "native"]
+            synced_events = [(n, b, s) for n, b, s in active_events if s == "synced"]
 
-            # 2. 如果没有日程且定位已启用，获取位置 (P2)
-            if not current_event and self.location_service and self.amap_service:
+            location = None
+            status = None
+
+            # P1: iCloud 原生日程（最高优先级）
+            if native_events:
+                event_name, is_busy, _ = native_events[0]
+                emoji = "🚫" if is_busy else "📅"
+                suffix = " (勿扰)" if is_busy else ""
+                status = {
+                    "status": "busy" if is_busy else "event",
+                    "emoji": emoji,
+                    "display": f"{emoji} {event_name}{suffix}",
+                    "location": "",
+                    "commute_mode": False,
+                }
+                logger.info(f"P1 原生日程: {event_name}")
+
+            # P2: 飞书/企微同步日程
+            elif synced_events:
+                event_name, is_busy, _ = synced_events[0]
+                emoji = "🚫" if is_busy else "📅"
+                suffix = " (勿扰)" if is_busy else ""
+                status = {
+                    "status": "busy" if is_busy else "event",
+                    "emoji": emoji,
+                    "display": f"{emoji} {event_name}{suffix}",
+                    "location": "",
+                    "commute_mode": False,
+                }
+                logger.info(f"P2 同步日程: {event_name}")
+
+            # P3: GPS 定位（可选）
+            elif self.location_service and self.amap_service:
                 loc_data = self.location_service.get_current_location()
                 if loc_data:
                     lat = loc_data.get("lat")
@@ -928,31 +961,38 @@ class StatusWallDaemon:
                             "lon": lon,
                             "name": location_name,
                         }
-                        logger.info(f"当前位置: {location_name} ({lat:.6f}, {lon:.6f})")
+                        logger.info(f"P3 GPS 位置: {location_name} ({lat:.6f}, {lon:.6f})")
                     else:
                         logger.warning("GPS 返回了空坐标")
                 else:
                     logger.warning("无法获取位置信息")
-            elif current_event:
-                logger.info(f"当前日程: {current_event[0]}")
 
-            # 3. 判断状态
-            if self.state_manager:
-                status = self.state_manager.determine_state(location, current_event)
-            else:
-                # 无定位模式：仅基于日程判断状态
-                status = self._determine_calendar_only_state(current_event)
+            # 使用 state_manager 处理定位状态（P3），或降级到 P4
+            if status is None:
+                if self.state_manager and location:
+                    status = self.state_manager.determine_state(location, None)
+                    logger.info(f"P3 定位状态: {status['display']}")
+                else:
+                    # P4: 空闲
+                    status = {
+                        "status": "free",
+                        "emoji": "✅",
+                        "display": "✅ 空闲",
+                        "location": "",
+                        "commute_mode": False,
+                    }
+                    logger.info("P4 空闲")
 
             logger.info(f"当前状态: {status['display']}")
 
-            # 4. 如果状态变化，写入共享日历
+            # 写入共享日历（置顶状态事件）
             if status['display'] != self.last_status:
                 try:
                     if self.calendar_writer.write_status(status['display']):
                         self.last_status = status['display']
                         if self.state_manager:
                             self.state_manager.set_last_display(status['display'])
-                        logger.info("状态已同步到日历")
+                        logger.info("置顶状态已同步到共享日历")
                     else:
                         logger.error("状态同步失败")
                 except Exception as e:
@@ -971,7 +1011,7 @@ class StatusWallDaemon:
             return False, None
 
     def _determine_calendar_only_state(self, current_event):
-        """无定位模式下的状态判断（仅基于日程）"""
+        """无定位模式下的状态判断（兼容旧接口，仅基于日程）"""
         if current_event:
             event_name, is_busy = current_event
             emoji = "🚫" if is_busy else "📅"
@@ -1494,7 +1534,7 @@ class AMapService:
 ## status_wall/calendar_reader.py
 
 ```python
-""" 日历读取模块 读取 iCloud 私人日历获取当前日程 """
+""" 日历读取模块 读取 iCloud 私人日历获取当前日程，区分原生事件和同步事件 """
 import logging
 from datetime import datetime, timedelta, date, timezone
 from caldav import DAVClient
@@ -1503,9 +1543,12 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
+# 同步事件标记前缀
+SYNC_TAGS = ("[企微]", "[飞书]")
+
 
 class CalendarReader:
-    """日历读取器 — 带连接复用和健壮的时间处理"""
+    """日历读取器 — 带连接复用和健壮的时间处理，支持事件来源分类"""
 
     def __init__(self):
         self.client = None
@@ -1555,19 +1598,31 @@ class CalendarReader:
             return datetime(dt_val.year, dt_val.month, dt_val.day)
         return None
 
-    def get_current_event(self):
+    @staticmethod
+    def _classify_event(summary):
         """
-        获取当前正在进行的日程
-        返回: (event_name: str, is_busy: bool) 或 None
+        判断事件来源
+        返回: "native" (用户自己的) 或 "synced" (从飞书/企微同步的)
+        """
+        for tag in SYNC_TAGS:
+            if summary.startswith(tag):
+                return "synced"
+        return "native"
+
+    def get_current_events(self):
+        """
+        获取当前正在进行的所有日程，并分类来源
+        返回: [(event_name: str, is_busy: bool, source: str), ...]
+              source 为 "native" 或 "synced"
         """
         try:
             if not self._ensure_connected():
-                return None
+                return []
 
             calendars = self.principal.calendars()
             if not calendars:
                 logger.warning("未找到日历")
-                return None
+                return []
 
             # 查找目标日历
             target_name = config.get("private_calendar_name", "")
@@ -1608,16 +1663,20 @@ class CalendarReader:
                 logger.warning(f"搜索日程失败，尝试重连: {e}")
                 self.principal = None
                 if not self._ensure_connected():
-                    return None
+                    return []
                 calendars = self.principal.calendars()
                 private_cal = calendars[0] if calendars else None
                 if not private_cal:
-                    return None
+                    return []
                 events = private_cal.search(start=start, end=end, event=True)
+
+            active_events = []
 
             for event in events:
                 try:
                     ical_data = event.data
+                    if not ical_data:
+                        continue
                     cal = iCalendar.from_ical(ical_data)
                     for component in cal.walk():
                         if component.name != "VEVENT":
@@ -1652,21 +1711,46 @@ class CalendarReader:
                         if dt_start <= now <= dt_end:
                             transp = str(component.get("transp", "OPAQUE")).upper()
                             is_busy = (transp == "OPAQUE")
-                            logger.info(f"当前日程: {summary} (busy={is_busy})")
-                            return (summary, is_busy)
+                            source = self._classify_event(summary)
+                            active_events.append((summary, is_busy, source))
+                            logger.info(f"活跃日程: {summary} (busy={is_busy}, source={source})")
 
                 except Exception as e:
                     logger.debug(f"解析事件失败: {e}")
                     continue
 
-            logger.debug("当前无进行中的日程")
-            return None
+            if not active_events:
+                logger.debug("当前无进行中的日程")
+
+            return active_events
 
         except Exception as e:
             logger.error(f"读取日程失败: {e}")
             # 标记连接失效
             self.principal = None
+            return []
+
+    def get_current_event(self):
+        """
+        获取当前正在进行的日程（兼容旧接口）
+        返回: (event_name: str, is_busy: bool) 或 None
+        优先级: P1 native > P2 synced
+        """
+        active_events = self.get_current_events()
+        if not active_events:
             return None
+
+        # P1: 优先返回原生事件
+        for name, is_busy, source in active_events:
+            if source == "native":
+                return (name, is_busy)
+
+        # P2: 其次返回同步事件
+        for name, is_busy, source in active_events:
+            if source == "synced":
+                return (name, is_busy)
+
+        return None
 
     def get_all_calendars(self):
         """获取所有日历列表"""
@@ -1683,7 +1767,7 @@ class CalendarReader:
 ## status_wall/calendar_writer.py
 
 ```python
-""" 日历写入模块 将状态写入 iCloud 共享日历 """
+""" 日历写入模块 将置顶状态写入 iCloud 共享日历 """
 import logging
 import uuid
 from datetime import datetime, timedelta
@@ -1693,8 +1777,8 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
-# 状态事件 emoji 前缀，用于识别和清理
-STATUS_EMOJIS = {"🏠", "🏢", "🚗", "📍", "🚫", "📅", "❓"}
+# 状态事件 emoji 前缀，用于识别和清理置顶状态事件
+STATUS_EMOJIS = {"🏠", "🏢", "🚗", "📍", "🚫", "📅", "❓", "✅"}
 
 
 class CalendarWriter:
@@ -1795,7 +1879,7 @@ class CalendarWriter:
             return False
 
     def write_status(self, status_display):
-        """写入状态到日历 — 创建一个全天事件"""
+        """写入置顶状态到共享日历 — 创建一个全天事件，清理旧的后只保留最新一个"""
         try:
             if not self._ensure_connected():
                 return False
@@ -2018,13 +2102,13 @@ class ExternalCalendarSync:
         1. PROPFIND 获取日历 URL + calendar-query 获取事件 href 列表
         2. calendar-multiget 批量获取事件数据
         
-        注意: 飞书 CalDAV 服务器可能很慢，timeout 设为 60s，并带重试
+        注意: 飞书 CalDAV 服务器从云端访问非常慢，timeout 设为 120s，并带 3 次重试
         """
         events_list = []
         auth = HTTPBasicAuth(username, password)
         ns = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:caldav"}
-        TIMEOUT = 60  # 飞书 CalDAV 较慢，需要更长超时
-        MAX_RETRIES = 2
+        TIMEOUT = 120  # 飞书 CalDAV 从云服务器访问很慢，需要 120s 超时
+        MAX_RETRIES = 3
 
         def _request_with_retry(method, url, **kwargs):
             """带重试的 HTTP 请求"""
